@@ -1,6 +1,6 @@
 {
   "name": "dsh-hermes-evolve",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Hermes Agent's self-evolution loop for DeepSeek Harness: background review fork, MEMORY/USER profile injection, skill authoring with support files, and a curator that archives but never deletes.",
   "keywords": [
     "dsh",
@@ -35,7 +35,8 @@
     "README.zh.md",
     "LICENSE",
     "CHANGELOG.md",
-    "COMPATIBILITY.md"
+    "COMPATIBILITY.md",
+    "AUDIT.md"
   ],
   "engines": {
     "node": ">=22.5.0"
@@ -46,7 +47,8 @@
   "scripts": {
     "test": "node --test test/",
     "check": "node scripts/check.js",
-    "extract:hermes": "python3 scripts/extract_prompts.py"
+    "extract:hermes": "python3 scripts/extract_prompts.py && python3 scripts/extract_schemas.py",
+    "audit:hermes": "python3 scripts/audit_hermes.py"
   },
   "dsh": {
     "bundle": {

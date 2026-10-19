@@ -99,6 +99,8 @@ for (const name of pkg.files || []) {
   if (!existsSync(join(ROOT, name))) fail(`package.json lists ${name} but it does not exist`)
 }
 if (!existsSync(join(ROOT, 'COMPATIBILITY.md'))) fail('COMPATIBILITY.md is missing')
+if (!existsSync(join(ROOT, 'AUDIT.md'))) fail('AUDIT.md is missing')
+if (!existsSync(join(ROOT, 'scripts', 'audit_hermes.py'))) fail('scripts/audit_hermes.py is missing')
 const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
 if (!changelog.includes(`## [${pkg.version}]`)) fail(`CHANGELOG.md has no section for ${pkg.version}`)
 ok('packaged files exist and the changelog matches the version')

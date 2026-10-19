@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
-OUT_JSON = HERE / 'src' / 'schemas.hermes.json'
-OUT_JS = HERE / 'src' / 'tool_schemas.js'
+OUT_JSON = Path(os.environ['HERMES_EVOLVE_OUT_JSON']) if os.environ.get('HERMES_EVOLVE_OUT_JSON') else HERE / 'src' / 'schemas.hermes.json'
+OUT_JS = Path(os.environ['HERMES_EVOLVE_OUT_JS']) if os.environ.get('HERMES_EVOLVE_OUT_JS') else HERE / 'src' / 'tool_schemas.js'
 SOURCE = 'NousResearch/hermes-agent@d923a5eb48 (v0.22.2)'
 
 
@@ -113,7 +113,7 @@ def main() -> None:
         encoding='utf-8',
     )
 
-    print(f'wrote {OUT_JSON.relative_to(HERE)} and {OUT_JS.relative_to(HERE)}')
+    print(f'wrote {OUT_JSON} and {OUT_JS}')
     for schema in schemas:
         params = schema.get('parameters') or {}
         print(f"  {schema['name']:14s} {len(json.dumps(schema)):6d} bytes, {len(params.get('properties') or {})} top-level props")

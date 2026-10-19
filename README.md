@@ -80,6 +80,26 @@ Then add `"dsh-hermes-evolve"` to `dsh.profile.bundles` exactly as above and res
 - Open the DSH settings page: a **hermes-evolve** section with every option below is projected automatically.
 - After one substantial session, the panel's skills/memory counters move and a `[hermes-evolve] 背景复盘完成…` notice appears in the conversation.
 
+### Verify parity with Hermes
+
+Two of the three verification tiers are machine-checkable and need no model:
+
+```bash
+npm run check   # artifacts intact: prompts, schemas, manifest, changelog
+npm test        # 52 behavioural tests
+
+# differential audit against a hermes checkout (python>=3.11 + ruamel.yaml + pyyaml)
+python3 -m venv /tmp/hermes-audit && /tmp/hermes-audit/bin/pip install ruamel.yaml pyyaml
+/tmp/hermes-audit/bin/python scripts/audit_hermes.py --hermes ../hermes-agent
+```
+
+The audit re-extracts the prompt and schema constants from the checkout and
+diffs them against what this repo ships, then feeds the same SKILL.md fixtures
+to Hermes' `tools.skill_linter` and to this port and compares the rule sets.
+Current run: 8 prompt texts / 4 schemas byte-identical, 13/15 linter rules
+matching. The third tier — end-to-end, needs the host and a model — is a
+checklist in [`AUDIT.md`](AUDIT.md).
+
 ## Where state lives
 
 | Path | Contents |

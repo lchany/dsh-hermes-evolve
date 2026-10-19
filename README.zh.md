@@ -78,6 +78,24 @@ npm install file:/absolute/path/to/dsh-hermes-evolve
 - 打开 DSH 设置页，应出现 **hermes-evolve** 分组，全部选项自动投影；
 - 跑一个较长的会话后，面板计数变化，且对话里会出现一行 `[hermes-evolve] 背景复盘完成…` 通知。
 
+### 验证与 Hermes 的一致性
+
+三层验证里有两层不需要模型，可以直接跑：
+
+```bash
+npm run check   # 产物完整性：prompt、schema、files、changelog
+npm test        # 52 个行为测试
+
+# 与 hermes checkout 做差分审计（python>=3.11 + ruamel.yaml + pyyaml）
+python3 -m venv /tmp/hermes-audit && /tmp/hermes-audit/bin/pip install ruamel.yaml pyyaml
+/tmp/hermes-audit/bin/python scripts/audit_hermes.py --hermes ../hermes-agent
+```
+
+脚本会从 checkout **重新抽取** prompt 与 schema 常量，与本仓库产物逐字节比较；再把同一批
+SKILL.md fixture 分别喂给 Hermes 的 `tools.skill_linter` 和本插件，比较命中的规则集合。
+当前结果：8 段 prompt / 4 个 schema 完全一致，15 条 linter 规则中 13 条被覆盖且两侧一致。
+第三层（端到端，需要宿主和模型）是 [`AUDIT.md`](AUDIT.md) 里的勾选清单。
+
 ## 状态文件位置
 
 | 路径 | 内容 |

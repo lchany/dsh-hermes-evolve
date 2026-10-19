@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-10-21
+
+Verifiability release: "is this really Hermes?" is now something you run, not
+something you take on trust.
+
+### Added
+
+- `scripts/audit_hermes.py` (`npm run audit:hermes`): differential audit against
+  a live hermes checkout. Re-extracts prompts/schemas into a temp dir and diffs
+  them against the shipped artifacts, then runs the same SKILL.md fixtures
+  through Hermes' `tools.skill_linter` and this port and compares rule sets.
+  Skips loudly (exit 2) when the interpreter cannot import Hermes' modules.
+- `AUDIT.md`: the three-tier local verification guide (byte-level, behavioural,
+  end-to-end checklist) plus an honest list of what cannot be checked locally.
+
+### Changed
+
+- `npm run extract:hermes` now refreshes both prompt and schema artifacts.
+- Both extractors honour `HERMES_EVOLVE_OUT*` overrides, so audits never write
+  into the working tree.
+
 ## [0.1.1] — 2026-10-20
 
 Fidelity pass: every mechanism that had been re-invented was re-derived from

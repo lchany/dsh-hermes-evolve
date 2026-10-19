@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
-OUT = HERE / 'src' / 'prompts.hermes.json'
+OUT = Path(os.environ['HERMES_EVOLVE_OUT']) if os.environ.get('HERMES_EVOLVE_OUT') else HERE / 'src' / 'prompts.hermes.json'
 SOURCE = 'NousResearch/hermes-agent@d923a5eb48 (v0.22.2)'
 
 
