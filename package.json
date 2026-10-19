@@ -1,0 +1,55 @@
+{
+  "name": "dsh-hermes-evolve",
+  "version": "0.1.0",
+  "description": "Hermes Agent's self-evolution loop for DeepSeek Harness: background review fork, MEMORY/USER profile injection, skill authoring with support files, and a curator that archives but never deletes.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "hermes",
+    "self-evolution",
+    "self-improvement",
+    "memory",
+    "skills",
+    "curator"
+  ],
+  "license": "MIT",
+  "author": "dsh-hermes-evolve contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USER/dsh-hermes-evolve.git"
+  },
+  "homepage": "https://github.com/YOUR_GITHUB_USER/dsh-hermes-evolve#readme",
+  "bugs": {
+    "url": "https://github.com/YOUR_GITHUB_USER/dsh-hermes-evolve/issues"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "check": "node scripts/check.js",
+    "extract:hermes": "python3 scripts/extract_prompts.py"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="hermes-evolve">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8cff"/>
+      <stop offset="1" stop-color="#8f5bff"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#g)"/>
+  <path d="M20 42c0-8 6-14 14-14 4 0 7 1 9 3" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M44 22c0 8-6 14-14 14-4 0-7-1-9-3" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" opacity="0.7"/>
+  <circle cx="45" cy="22" r="4" fill="#fff"/>
+  <circle cx="19" cy="42" r="4" fill="#fff" opacity="0.7"/>
+</svg>
