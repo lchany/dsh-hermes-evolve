@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-10-20
+
+Fidelity pass: every mechanism that had been re-invented was re-derived from
+Hermes' source (`NousResearch/hermes-agent@d923a5eb48`, v0.22.2) and restored to
+the original semantics. `COMPATIBILITY.md` now documents the module-by-module
+map and every remaining deviation.
+
+### Changed
+
+- Review and curator passes send their prompt as the fork's **user message**,
+  exactly like Hermes; the system prompt is never rewritten (D2 in
+  `COMPATIBILITY.md`). The invented "suspects + catalog" preload is gone — the
+  fork reads the library itself through `skills_list` / `skill_view`.
+- Memory destructive writes (`replace` / `remove`, batch included) from an
+  unattended pass are **staged** for approval instead of being applied
+  (Hermes #105921), and the panel's pending view now applies an approved memory
+  change.
+- `turnInterval` split into `skillNudgeInterval` (tool iterations) and
+  `memoryNudgeInterval` (user turns), both 10 — the two counters Hermes keeps
+  separately. Removed `toolCallInterval`, `suspectsTopN`, `catalogDescriptionMax`
+  and `cooldownMinutes` (never enforced).
+- The skill linter is now the full 15-rule port (`skill_linter.py`), including
+  `shell-utility-reference`, `missing-section`, `platforms-gating` and
+  `forbidden-file`.
+- Frontmatter parsing/serialising handles the nested `metadata.hermes.*` maps
+  and inline flow lists that real skills use.
+
+### Added
+
+- `COMPATIBILITY.md` — verbatim inventory (8 prompts, 4 schemas, fixed strings,
+  thresholds) and deviations D1–D12 with their reasons.
+
 ## [0.1.0] — 2026-10-19
 
 First public release: the four capabilities of Hermes Agent's self-evolution

@@ -67,7 +67,7 @@ function readBody (req) {
  *  schema key the host would silently drop. */
 const EDITABLE_SETTINGS = [
   'enabled', 'mode', 'memoryMode', 'skillsMode', 'provider', 'model',
-  'turnInterval', 'toolCallInterval', 'cooldownMinutes', 'reviewTimeoutSec',
+  'skillNudgeInterval', 'memoryNudgeInterval', 'reviewTimeoutSec',
   'signalTriggerEnabled', 'signalToolFailureMin',
   'memoryInjectionEnabled', 'memoryEnabled', 'userProfileEnabled',
   'coachingEnabled', 'coachingMode',
@@ -176,8 +176,31 @@ function registerPanelRoutes (webServerCtx, deps) {
 
       if (req.method === 'POST' && route === '/pending') {
         const body = await readBody(req)
-        const outcome = await store.resolvePending(String(body.id || ''), String(body.decision || 'approved'))
-        sendJson(res, outcome.ok === true ? 200 : 404, outcome)
+        const decision = String(body.decision || 'approved')
+        const outcome = await store.resolvePending(String(body.id || ''), decision)
+        if (outcome.ok !== true) {
+          sendJson(res, 404, outcome)
+          return
+        }
+        const record = outcome.record
+        if (decision === 'approved' && record.kind === 'memory') {
+          // hermes `/memory pending` approve: replay the staged operations.
+          const applied = await memory.writeMemory(
+            util.memoryDir(),
+            record.target === 'user' ? 'user' : 'memory',
+            Array.isArray(record.operations) ? record.operations : [],
+            { limit: Number.isFinite(record.limit) ? record.limit : undefined },
+          )
+          if (applied.ok !== true) {
+            sendJson(res, 409, { ok: false, applied, record })
+            return
+          }
+          const marked = await store.markPending(record.id, 'approved', { applied: true })
+          sendJson(res, 200, { ok: true, applied, record: marked.record })
+          return
+        }
+        const marked = await store.markPending(record.id, decision === 'approved' ? 'approved' : 'rejected')
+        sendJson(res, 200, { ok: marked.ok === true, record: marked.record, error: marked.error })
         return
       }
 
@@ -343,7 +366,7 @@ const API = '/hermes-evolve/api'
 const $ = (id) => document.getElementById(id)
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 const BOOL_FIELDS = ['enabled','signalTriggerEnabled','memoryInjectionEnabled','memoryEnabled','userProfileEnabled','coachingEnabled','linterEnabled','ledgerEnabled','curatorEnabled','curatorConsolidate']
-const NUM_FIELDS = ['turnInterval','toolCallInterval','cooldownMinutes','reviewTimeoutSec','curatorIntervalHours','curatorMinIdleHours','curatorStaleDays','curatorArchiveDays','curatorBackupKeep']
+const NUM_FIELDS = ['skillNudgeInterval','memoryNudgeInterval','reviewTimeoutSec','curatorIntervalHours','curatorMinIdleHours','curatorStaleDays','curatorArchiveDays','curatorBackupKeep']
 
 async function get (path) { const r = await fetch(API + path); return r.json() }
 async function post (path, body) { const r = await fetch(API + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); return r.json() }

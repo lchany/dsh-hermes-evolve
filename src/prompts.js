@@ -87,103 +87,70 @@ function memoryGuidance (enabled) {
 // ── review prompts (fork system prompt) ────────────────────────────────────
 
 /**
- * Which verbatim prompt a pass runs under. hermes `_PROMPT_NAME_BY_SCOPE`:
+ * The verbatim review prompt for a pass. hermes `_PROMPT_NAME_BY_SCOPE`:
  * (memory, skills) -> combined; memory only -> memory; anything else -> skills.
+ * Hermes assigns this text to the fork's *user message*, never to its system
+ * prompt: `run_conversation(user_message=prompt + tool_suffix, conversation_history=...)`.
  */
-function reviewSystemPrompt ({ reviewMemory, reviewSkills }) {
+function reviewPrompt ({ reviewMemory, reviewSkills }) {
   if (reviewMemory === true && reviewSkills === true) return T._COMBINED_REVIEW_PROMPT
   if (reviewMemory === true) return T._MEMORY_REVIEW_PROMPT
   return T._SKILL_REVIEW_PROMPT
 }
 
 /**
- * Pin the artifact language to the conversation's language. Both
- * `@weibaohui/hermes-loop` and hermes found the same failure: a fully-English
- * protocol with a Chinese catalog/memory produced a Chinese SKILL.md even when
- * the user's preference was English. The protocol keywords stay English because
- * the tools and headings they drive are English.
+ * The tool-availability sentence Hermes appends to every review prompt
+ * (`agent/background_review.py:1175`). The memory phrase is dropped when the
+ * memory tool is not whitelisted, "so a memory-less review must not tell the
+ * model that memory is available, or it will burn iterations on denied calls."
  */
-function reviewLanguageDirective (lang) {
-  const label = lang === 'en' ? 'English' : 'Chinese (Simplified)'
-  return [
-    `Write every artifact you save in ${label}: skill bodies, skill descriptions, and memory entries.`,
-    'Keep as-is: JSON keys, tool names, file paths, code, and the fixed SKILL.md section headings',
-    '(When to Use / Prerequisites / Procedure / Pitfalls / Verification).',
-    'The conversation, the catalog, and the memory files may be in another language — that is not a signal about the artifact language.',
-  ].join(' ')
+function reviewToolSuffix ({ memoryAllowed }) {
+  const memoryPhrase = memoryAllowed === true ? 'memory and skill ' : 'skill '
+  return `You can only call ${memoryPhrase}management tools. Other tools will be denied at runtime — do not attempt them.`
 }
-
-const REVIEW_FRAME_OPEN = '<conversation_to_review>'
-const REVIEW_FRAME_CLOSE = '</conversation_to_review>'
 
 /**
- * The user message for a review pass: the transcript, the current catalog, and
- * the full body of the skills most likely to be relevant. Suspects are loaded
- * eagerly because a fork with no edit history cannot guess which skill a lesson
- * belongs to, and paying to view the wrong one costs more than pasting the right
- * three (hermes `rankSuspects`).
+ * The fork's user message.
+ *
+ * Hermes replays the parent conversation as provider-shaped history and sends
+ * the bare prompt on top. DSH session events carry provider stream records, so
+ * replaying history would mean fabricating events; the transcript is inlined in
+ * front of the prompt instead, which keeps the model input equivalent
+ * ([conversation…, instruction]) at the cost of role alternation.
  */
-function buildReviewUserMessage ({ transcript, catalog, suspects, lang, extra }) {
-  const parts = []
-  parts.push(`Conversation transcript (most recent turns last):\n${REVIEW_FRAME_OPEN}\n${transcript}\n${REVIEW_FRAME_CLOSE}`)
-  if (Array.isArray(catalog) && catalog.length > 0) {
-    parts.push([
-      'Current skill library (name — description):',
-      ...catalog.map((entry) => `- ${entry.name}${entry.description ? ` — ${entry.description}` : ''}`),
-    ].join('\n'))
-  } else {
-    parts.push('Current skill library: empty — no skills exist yet.')
-  }
-  if (Array.isArray(suspects) && suspects.length > 0) {
-    const blocks = suspects.map((suspect) => {
-      const header = `### SKILL: ${suspect.name}\n${suspect.description || ''}`
-      const linked = suspect.linked && Object.keys(suspect.linked).length > 0
-        ? `\nLinked files: ${JSON.stringify(suspect.linked)}`
-        : ''
-      return `${header}${linked}\n\n${suspect.content}`
-    })
-    parts.push(`Relevant skills, loaded in full because the transcript matched them:\n\n${blocks.join('\n\n---\n\n')}`)
-  }
-  parts.push(reviewLanguageDirective(lang))
-  if (typeof extra === 'string' && extra.trim() !== '') parts.push(extra)
-  return parts.join('\n\n')
+function buildReviewMessage ({ transcript, prompt, memoryAllowed }) {
+  return `${transcript}\n\n---\n\n${prompt}\n\n${reviewToolSuffix({ memoryAllowed })}`
 }
 
-// ── curator prompt (consolidation fork system prompt) ───────────────────────
+// ── curator prompt (consolidation fork user message) ────────────────────────
 
-function curatorSystemPrompt ({ dryRun }) {
-  const banner = dryRun === true ? `${T.CURATOR_DRY_RUN_BANNER}\n\n` : ''
-  return `${banner}${T.CURATOR_REVIEW_PROMPT}`
-}
-
-function buildCuratorUserMessage ({ catalog, usage, idleDays, now, dryRun, lang, extra }) {
-  const lines = []
-  // Tolerate both shapes: a name->record map (the caller's form) and an array of
-  // records (convenient in tests and panels).
-  const usageMap = Array.isArray(usage)
-    ? Object.fromEntries(usage.filter((row) => row && row.name).map((row) => [row.name, row]))
-    : (usage || {})
-  const skills = Array.isArray(catalog) ? catalog : []
-  const rules = (idleDays && typeof idleDays === 'object') ? idleDays : {}
-  lines.push(`Current time: ${now}`)
-  lines.push(`Enabled curator rules: stale_after_days=${rules.staleDays}, archive_after_days=${rules.archiveDays}. ` +
-    'A skill at or beyond stale_after_days of inactivity has already been MARKED stale by the deterministic pass; ' +
-    'it is still in the library and still yours to consolidate.')
-  if (dryRun === true) lines.push('DRY-RUN: report only. Do not call any mutating tool.')
-  lines.push('')
-  lines.push('Current skill library, with lifetime counters (<name> | state | uses | views | patches | last activity):')
-  for (const entry of skills) {
-    const record = usageMap[entry.name] || {}
-    const last = record.last_used_at || record.last_viewed_at || record.last_patched_at || record.created_at || 'never'
-    lines.push(`- ${entry.name} | ${record.state || 'active'} | use=${record.use_count || 0} | view=${record.view_count || 0} | patch=${record.patch_count || 0} | last=${last}`)
-    if (entry.description) lines.push(`    ${entry.description}`)
-    if (record.created_by) lines.push(`    created_by=${record.created_by}${record.pinned ? ' pinned=true' : ''}`)
+/**
+ * hermes `_render_candidate_list()` verbatim in shape: one header line plus one
+ * row per curator-managed skill, with the same field order and separators.
+ */
+function renderCandidateList (rows) {
+  const list = Array.isArray(rows) ? rows : []
+  if (list.length === 0) return 'No agent-created skills to review.'
+  const lines = [`Agent-created skills (${list.length}):`]
+  for (const row of list) {
+    const provenance = row.provenance || 'agent'
+    lines.push(
+      `- ${row.name}  provenance=${provenance}  state=${row.state || 'active'}  ` +
+      `pinned=${row.pinned ? 'yes' : 'no'}  cron=${row.cron ? 'yes' : 'no'}  ` +
+      `activity=${row.activity_count || 0}  use=${row.use_count || 0}  view=${row.view_count || 0}  ` +
+      `patches=${row.patch_count || 0}  last_activity=${row.last_activity_at || 'never'}`,
+    )
   }
-  lines.push('')
-  lines.push(reviewLanguageDirective(lang).replace('skill bodies, skill descriptions, and memory entries',
-    'skill bodies and skill descriptions'))
-  if (typeof extra === 'string' && extra.trim() !== '') lines.push(extra)
   return lines.join('\n')
+}
+
+/**
+ * The curator fork's user message: `${CURATOR_REVIEW_PROMPT}\n\n${candidate_list}`,
+ * prepended with the dry-run banner when reporting only (hermes `_consolidation_pass`).
+ */
+function curatorPrompt ({ dryRun, rows }) {
+  const prompt = `${T.CURATOR_REVIEW_PROMPT}\n\n${renderCandidateList(rows)}`
+  return dryRun === true ? `${T.CURATOR_DRY_RUN_BANNER}\n\n${prompt}` : prompt
 }
 
 module.exports = {
@@ -194,9 +161,9 @@ module.exports = {
   MEMORY_GUIDANCE_TEXT,
   skillsCoaching,
   memoryGuidance,
-  reviewSystemPrompt,
-  reviewLanguageDirective,
-  buildReviewUserMessage,
-  curatorSystemPrompt,
-  buildCuratorUserMessage,
+  reviewPrompt,
+  reviewToolSuffix,
+  buildReviewMessage,
+  renderCandidateList,
+  curatorPrompt,
 }

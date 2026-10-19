@@ -188,22 +188,32 @@ async function deterministicPass ({ settings, nowMs = Date.now() }) {
 // ── consolidation pass (LLM) ───────────────────────────────────────────────
 
 async function consolidationPass ({ hostCtx, settings, logger, dryRun, model }) {
-  const now = new Date()
   const skills = await store.scanSkills()
   const usage = await usageMod.loadUsage()
-  const catalog = skills.map((skill) => ({ name: skill.name, description: skill.description, category: skill.category }))
-  const systemPrompt = prompts.curatorSystemPrompt({ dryRun })
-  const userMessage = prompts.buildCuratorUserMessage({
-    catalog,
-    usage,
-    idleDays: {
-      staleDays: Math.max(1, Number(settings.curatorStaleDays) || 14),
-      archiveDays: Math.max(1, Number(settings.curatorArchiveDays) || 30),
-    },
-    now: now.toISOString(),
-    dryRun,
-    lang: settings.lang,
-  })
+  // hermes `_render_candidate_list()`: only curator-managed skills are offered to
+  // the LLM pass, with the same row shape the prompt renders.
+  const rows = []
+  for (const skill of skills) {
+    const record = usage[skill.name]
+    if (record === undefined || !usageMod.isCuratorManagedRecord(record)) continue
+    rows.push({
+      name: skill.name,
+      provenance: record.created_by || 'agent',
+      state: record.state || 'active',
+      pinned: record.pinned === true,
+      cron: false,
+      activity_count: usageMod.activityCount(record),
+      use_count: record.use_count || 0,
+      view_count: record.view_count || 0,
+      patch_count: record.patch_count || 0,
+      last_activity_at: usageMod.latestActivityAt(record),
+    })
+  }
+  if (rows.length === 0) {
+    return { ok: true, skipped: 'no-candidates', summary: 'No agent-created skills to review.', deletes: [], before: [], after: [] }
+  }
+
+  const userMessage = prompts.curatorPrompt({ dryRun, rows })
 
   const controller = new AbortController()
   const marks = store.makeReadMarks()
@@ -219,6 +229,8 @@ async function consolidationPass ({ hostCtx, settings, logger, dryRun, model }) 
     maxBodyChars: settings.maxBodyChars,
     memoryCharLimit: settings.memoryCharLimit,
     userCharLimit: settings.userCharLimit,
+    // hermes curator fork: `skip_memory=True`, `enabled_toolsets=["skills"]`.
+    includeMemory: false,
   })
   const selected = model && (model.provider || model.model)
     ? model
@@ -236,9 +248,8 @@ async function consolidationPass ({ hostCtx, settings, logger, dryRun, model }) 
         : {},
       signal: controller.signal,
       setup (agentCtx) {
-        agentCtx.systemPrompt.section({
-          name: 'hermes-evolve:curator-system', order: 0, text: systemPrompt, complete: true, interpolate: false,
-        })
+        // hermes delivers the curator prompt as the fork's user message and never
+        // rewrites the system prompt.
         for (const definition of tools) agentCtx.tools.register(definition)
         restrictInherited(agentCtx, logger)
       },
@@ -249,7 +260,7 @@ async function consolidationPass ({ hostCtx, settings, logger, dryRun, model }) 
     const summary = lastAssistantText(agent)
     const deletes = collectToolDeletes(agent)
     const after = await store.scanSkills()
-    return { ok: true, summary, deletes, before: catalog.map((entry) => entry.name), after: after.map((entry) => entry.name), dryRun }
+    return { ok: true, summary, deletes, before: rows.map((row) => row.name), after: after.map((entry) => entry.name), dryRun }
   } catch (error) {
     return { ok: false, error: error && error.message ? error.message : String(error) }
   } finally {

@@ -12,10 +12,11 @@
  * cache are never touched. That is the whole self-evolution loop.
  *
  * Faithfulness notes:
- *  - The fork's system prompt is hermes' review prompt verbatim, registered as a
- *    `complete` system-prompt section so nothing else leaks into the fork's
- *    instructions (a fork with the main prompt plus "you are a reviewer" behaves
- *    like the main agent and rewrites transcripts instead of skills).
+ *  - Hermes delivers the review prompt as the fork's USER MESSAGE
+ *    (`run_conversation(user_message=prompt + tool_suffix, conversation_history=...)`)
+ *    and never rewrites the system prompt — the fork keeps the parent's cached
+ *    prompt so the review rides the same prefix cache. We do the same: the
+ *    prompt goes in the user message, no system-prompt section is installed.
  *  - Triggers match hermes: skill review fires at a tool-iteration interval,
  *    memory review at a user-turn interval, both only on a completed turn with a
  *    delivered response, and each resets its own counter when it fires.
@@ -30,8 +31,6 @@ const usage = require('./skill_usage')
 const prompts = require('./prompts')
 const { buildToolSet } = require('./skill_tools')
 
-const DEFAULT_CATALOG_DESC_MAX = 500
-const SUSPECT_BODY_MAX_CHARS = 8 * 1024
 const TRANSCRIPT_MESSAGE_CHARS = 4000
 
 // ── transcript rendering ───────────────────────────────────────────────────
@@ -56,7 +55,7 @@ function contentToText (content) {
  * a truncated head is worse than no head at all (the model cannot tell what it
  * is looking at).
  */
-function renderTranscript (messages, { maxChars = 12000, maxMessages = 40, lang = 'zh' } = {}) {
+function renderTranscript (messages, { maxChars = 12000, maxMessages = 40 } = {}) {
   const rows = []
   for (const message of messages) {
     if (message === null || typeof message !== 'object') continue
@@ -83,72 +82,6 @@ function renderTranscript (messages, { maxChars = 12000, maxMessages = 40, lang 
   return joined
 }
 
-// ── suspect ranking ────────────────────────────────────────────────────────
-
-const STOPWORDS = new Set(('the and for with that this from your you are was were will would can could should not but '
-  + 'have has had how what when where which who why all any each into out its it is a an of to in on at as be by or if '
-  + 'do does did done just now then than so more most very much many some such only also even still yet about over under')
-  .split(' '))
-
-function tokenize (text) {
-  const tokens = new Set()
-  for (const raw of String(text || '').toLowerCase().split(/[^\p{L}\p{N}_-]+/u)) {
-    if (raw.length < 3) continue
-    if (STOPWORDS.has(raw)) continue
-    tokens.add(raw)
-  }
-  return tokens
-}
-
-/**
- * Score the catalog against the transcript and return the top hits with BODIES
- * already loaded. The fork has no cheap way to search the library, so if we only
- * hand it a catalog it tends to invent a new skill instead of patching the right
- * existing one — the exact failure hermes learned against.
- */
-function rankSuspects (catalog, transcriptText, { topN = 3 } = {}) {
-  const transcriptTokens = tokenize(transcriptText)
-  const scored = catalog.map((entry) => {
-    const hay = tokenize(`${entry.name} ${entry.description || ''}`)
-    let score = 0
-    for (const token of hay) if (transcriptTokens.has(token)) score += entry.name.toLowerCase().includes(token) ? 2 : 1
-    return { entry, score }
-  })
-  return scored
-    .filter((row) => row.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topN)
-    .map((row) => row.entry)
-}
-
-async function loadSuspects (catalog, transcriptText, { topN = 3 } = {}) {
-  const ranked = rankSuspects(catalog, transcriptText, { topN })
-  const out = []
-  for (const entry of ranked) {
-    const skill = await store.findSkill(entry.name)
-    if (skill === undefined) continue
-    const linked = await store.listLinkedFiles(skill.dir)
-    out.push({
-      name: skill.name,
-      description: skill.description,
-      content: skill.content.length > SUSPECT_BODY_MAX_CHARS
-        ? `${skill.content.slice(0, SUSPECT_BODY_MAX_CHARS)}\n[...body truncated]`
-        : skill.content,
-      linked,
-    })
-  }
-  return out
-}
-
-function catalogForPrompt (catalog, maxChars) {
-  return catalog.map((entry) => ({
-    name: entry.name,
-    description: entry.description && entry.description.length > maxChars
-      ? `${entry.description.slice(0, maxChars)}…`
-      : entry.description,
-  }))
-}
-
 // ── the fork ───────────────────────────────────────────────────────────────
 
 /**
@@ -171,22 +104,16 @@ async function runReview (hostCtx, options) {
   const transcript = renderTranscript(messages, {
     maxChars: settings.maxTranscriptChars,
     maxMessages: settings.maxTranscriptMessages,
-    lang: settings.lang,
   })
   if (transcript.trim() === '') return { ok: false, skipped: 'empty-transcript' }
 
-  const catalogRaw = await store.scanSkills()
-  const catalog = catalogRaw.map((skill) => ({ name: skill.name, description: skill.description, category: skill.category }))
-  const suspects = reviewSkills ? await loadSuspects(catalog, transcript, { topN: settings.suspectsTopN }) : []
-
-  const systemPrompt = prompts.reviewSystemPrompt({ reviewMemory, reviewSkills })
-  const userMessage = prompts.buildReviewUserMessage({
-    transcript,
-    catalog: catalogForPrompt(catalog, settings.catalogDescriptionMax),
-    suspects,
-    lang: settings.lang,
-    extra: focus ? `Focus requested by the user: ${focus}` : '',
-  })
+  // hermes: the memory toolset enters the whitelist only when the memory
+  // dimension actually fired AND memory is enabled; the prompt suffix follows
+  // the same flag so the fork is never told about a tool it cannot call.
+  const memoryAllowed = reviewMemory === true && settings.memoryEnabled !== false && settings.memoryMode !== 'off'
+  const reason = prompts.reviewPrompt({ reviewMemory, reviewSkills })
+  const extra = typeof focus === 'string' && focus.trim() !== '' ? `\n\nFocus requested by the user: ${focus}` : ''
+  const userMessage = prompts.buildReviewMessage({ transcript, prompt: reason, memoryAllowed }) + extra
 
   const controller = new AbortController()
   const marks = store.makeReadMarks()
@@ -204,6 +131,10 @@ async function runReview (hostCtx, options) {
     maxBodyChars: settings.maxBodyChars,
     memoryCharLimit: settings.memoryCharLimit,
     userCharLimit: settings.userCharLimit,
+    includeMemory: memoryAllowed,
+    // The fork is unattended: memory replace/remove are staged for a human,
+    // never applied silently (hermes #105921).
+    unattendedMemory: true,
     // Approval mode: the fork may read and propose, but a human lands the write.
     writeApproval: settings.mode === 'approval',
     lang: settings.lang,
@@ -229,15 +160,7 @@ async function runReview (hostCtx, options) {
         : {},
       signal: controller.signal,
       setup (agentCtx) {
-        // The review prompts ARE the strategy; they become the fork's whole prompt.
-        agentCtx.systemPrompt.section({
-          name: 'hermes-evolve:review-system',
-          order: 0,
-          text: systemPrompt,
-          complete: true,
-          interpolate: false,
-        })
-        // The four hermes tools live in the fork's own layer, so the main
+        // The review tools live in the fork's own layer, so the main
         // conversation's tool surface is unchanged.
         for (const definition of tools) agentCtx.tools.register(definition)
         restrictInheritedTools(agentCtx, logger)
@@ -261,7 +184,6 @@ async function runReview (hostCtx, options) {
       scope: { reviewMemory, reviewSkills },
       durationMs: Date.now() - startedAt,
       usage: usageStats,
-      suspects: suspects.map((suspect) => suspect.name),
       model: selected,
     }
   } catch (error) {
@@ -395,8 +317,10 @@ function createScheduler ({ hostCtx, settings, logger }) {
       case 'turn/end': {
         const reason = event.data && event.data.reason ? event.data.reason.kind : 'completed'
         const interrupted = reason !== 'completed' || state.lastTurnInterrupted
-        const skillInterval = settings.turnInterval > 0 ? settings.turnInterval : 0
-        const memoryInterval = settings.memoryMode !== 'off' && settings.memoryEnabled !== false ? settings.turnInterval : 0
+        const skillInterval = settings.skillNudgeInterval > 0 ? settings.skillNudgeInterval : 0
+        const memoryInterval = settings.memoryMode !== 'off' && settings.memoryEnabled !== false && settings.memoryNudgeInterval > 0
+          ? settings.memoryNudgeInterval
+          : 0
         const fireSkills = settings.skillsMode !== 'off' && skillInterval > 0 && state.itersSinceSkill >= skillInterval
         const fireMemory = memoryInterval > 0 && state.turnsSinceMemory >= memoryInterval
         if (fireSkills) state.itersSinceSkill = 0
@@ -478,9 +402,6 @@ function appendReviewNotice (session, result, logger) {
 
 module.exports = {
   renderTranscript,
-  tokenize,
-  rankSuspects,
-  loadSuspects,
   runReview,
   createScheduler,
   snapshotMessages,

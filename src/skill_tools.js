@@ -61,6 +61,12 @@ function toolContext (overrides = {}) {
     maxBodyChars: store.BODY_MAX_CHARS,
     memoryCharLimit: DEFAULTS.memoryCharLimit,
     userCharLimit: DEFAULTS.userCharLimit,
+    // hermes `_review_tool_whitelist`: a memory-less review pass must not even
+    // SEE the memory tool, or it burns iterations on a denied call.
+    includeMemory: true,
+    // hermes #105921: an unattended fork may add notes but may not delete or
+    // rewrite existing ones — those are staged for a human instead.
+    unattendedMemory: false,
     lang: 'zh',
     ...overrides,
   }
@@ -267,11 +273,9 @@ async function opCreate (op, name, ctx, bag) {
   await ensureDir(dir)
   bag.created.push(dir)
   await atomicWrite(mdPath, content)
-  const createdSkill = await store.findSkill(name)
   await usage.recordCreated(name, { agentCreated: ctx.agentCreated === true })
   if (ctx.linterEnabled) {
-    const findings = linter.lintSkill(createdSkill, [], {})
-      .concat(linter.lintReferences(createdSkill ? createdSkill.body : '', []))
+    const findings = linter.lintContent(content, { skillDir: dir })
     if (findings.length > 0) bag.lintNotes.push({ skill: name, findings })
   }
   if (ctx.ledgerEnabled) {
@@ -327,13 +331,9 @@ async function opPatch (op, name, ctx, bag) {
   await usage.recordPatched(name)
 
   if (ctx.linterEnabled) {
-    const files = await flattenLinked(skill.dir)
-    const beforeFindings = linter.lintSkill({ ...skill, content: current, body: store.stripFrontmatter(current) }, files, {})
+    const beforeFindings = linter.lintContent(current, { skillDir: skill.dir })
     const afterRaw = filePath === undefined ? next : current
-    const afterSkill = filePath === undefined
-      ? { ...skill, content: next, body: store.stripFrontmatter(next) }
-      : { ...skill, content: afterRaw, body: store.stripFrontmatter(afterRaw) }
-    const afterFindings = linter.lintSkill(afterSkill, files, {}).concat(linter.lintReferences(afterSkill.body, files))
+    const afterFindings = linter.lintContent(afterRaw, { skillDir: skill.dir })
     const fresh = linter.newlyIntroduced(beforeFindings, afterFindings)
     if (fresh.length > 0) bag.lintNotes.push({ skill: name, findings: fresh })
   }
@@ -355,11 +355,6 @@ function countOccurrences (haystack, needle) {
     index = haystack.indexOf(needle, index + needle.length)
   }
   return count
-}
-
-async function flattenLinked (dir) {
-  const linked = await store.listLinkedFiles(dir)
-  return Object.values(linked).flat()
 }
 
 async function opWriteFile (op, name, ctx, bag) {
@@ -385,9 +380,13 @@ async function opWriteFile (op, name, ctx, bag) {
   await atomicWrite(target, content)
   if (prior === undefined) await usage.recordPatched(name)
   if (ctx.linterEnabled) {
-    const files = await flattenLinked(skill.dir)
-    const findings = linter.lintReferences(skill.body, files)
-    if (findings.length > 0) bag.lintNotes.push({ skill: name, findings })
+    // Re-lint the body: a written or removed support file can fix or create a
+    // dangling reference (hermes re-runs the linter on write_file for that reason).
+    const body = await readFileSafe(skill.mdPath)
+    if (body !== undefined) {
+      const findings = linter.lintContent(body, { skillDir: skill.dir })
+      if (findings.length > 0) bag.lintNotes.push({ skill: name, findings })
+    }
   }
   if (ctx.ledgerEnabled) {
     await store.ledgerAppend({
@@ -470,6 +469,21 @@ async function opDelete (op, name, ctx, bag) {
 
 // ── memory ─────────────────────────────────────────────────────────────────
 
+const BG_DELETE_ACTIONS = new Set(['replace', 'remove'])
+const BG_DELETE_REFUSAL = "Background review may not delete memory entries ('replace'/'remove', including in a batch); 'add' is still available."
+
+/** hermes `stage_write` response for an unattended destructive memory edit. */
+function stagedMemoryEnvelope (row) {
+  return json({
+    success: true,
+    done: true,
+    staged: true,
+    proposal_staged: true,
+    pending_id: row.id,
+    message: 'Background review may not delete memory entries unattended. The proposed change was staged for your approval — open the hermes-evolve panel to approve (apply) or reject (drop) it.',
+  })
+}
+
 async function handleMemory (args, ctx) {
   try {
     if (ctx.writeApproval === true) return fail(APPROVAL_REFUSAL)
@@ -491,6 +505,16 @@ async function handleMemory (args, ctx) {
         text: typeof op.content === 'string' ? op.content : (typeof op.new_text === 'string' ? op.new_text : ''),
         oldText: typeof op.old_text === 'string' ? op.old_text : '',
       }))
+      if (ctx.unattendedMemory === true && normalized.some((op) => BG_DELETE_ACTIONS.has(op.action))) {
+        let row
+        try {
+          row = await store.stagePending({ kind: 'memory', target, limit, operations: normalized, actor: 'background-review' })
+        } catch (error) {
+          return fail(BG_DELETE_REFUSAL)
+        }
+        if (!row || row.id === undefined) return fail(BG_DELETE_REFUSAL)
+        return stagedMemoryEnvelope(row)
+      }
       const outcome = await memory.writeMemory(memoryDir(), target, normalized, { limit })
       return json(outcome.ok ? successEnvelope('batch') : failureEnvelope(outcome, target))
     }
@@ -503,6 +527,16 @@ async function handleMemory (args, ctx) {
     }
     if (action !== 'add' && oldText.trim() === '') {
       return fail(`old_text is required for '${action}': a short unique substring identifying the existing entry.`)
+    }
+    if (ctx.unattendedMemory === true && BG_DELETE_ACTIONS.has(action)) {
+      let row
+      try {
+        row = await store.stagePending({ kind: 'memory', target, limit, operations: [{ action, text: content, oldText }], actor: 'background-review' })
+      } catch (error) {
+        return fail(BG_DELETE_REFUSAL)
+      }
+      if (!row || row.id === undefined) return fail(BG_DELETE_REFUSAL)
+      return stagedMemoryEnvelope(row)
     }
     const outcome = await memory.writeMemory(memoryDir(), target, [{ action, text: content, oldText }], { limit })
     return json(outcome.ok ? successEnvelope(action) : failureEnvelope(outcome, target))
@@ -562,12 +596,13 @@ function buildToolSet (options = {}) {
   const context = typeof options.resolveContext === 'function'
     ? options.resolveContext
     : toolContext(options)
-  return [
+  const tools = [
     toolDefinition(SCHEMAS.skills_list, handleSkillsList, context),
     toolDefinition(SCHEMAS.skill_view, handleSkillView, context),
     toolDefinition(SCHEMAS.skill_manage, handleSkillManage, context),
-    toolDefinition(SCHEMAS.memory, handleMemory, context),
   ]
+  if (!(options.includeMemory === false)) tools.push(toolDefinition(SCHEMAS.memory, handleMemory, context))
+  return tools
 }
 
 const TOOL_NAMES = ['skills_list', 'skill_view', 'skill_manage', 'memory']

@@ -26,14 +26,11 @@ const DEFAULTS = {
   model: '',
 
   // ── trigger ──────────────────────────────────────────────────────────────
-  turnInterval: 10,
-  toolCallInterval: 10,
-  cooldownMinutes: 30,
+  skillNudgeInterval: 10,
+  memoryNudgeInterval: 10,
   maxTranscriptChars: 12000,
   maxTranscriptMessages: 40,
   reviewTimeoutSec: 300,
-  suspectsTopN: 3,
-  catalogDescriptionMax: 500,
 
   // Signals let a cheap, high-recall trigger fire early; precision is the
   // review agent's negative list's job, not the trigger's.
@@ -109,14 +106,11 @@ function settingsSchema (S) {
     provider: S.string().default('').volatile(),
     model: S.string().default('').volatile(),
 
-    turnInterval: S.number().min(1).default(10).volatile(),
-    toolCallInterval: S.number().min(0).default(10).volatile(),
-    cooldownMinutes: S.number().min(0).default(30).volatile(),
+    skillNudgeInterval: S.number().min(1).default(10).volatile(),
+    memoryNudgeInterval: S.number().min(1).default(10).volatile(),
     maxTranscriptChars: S.number().min(1000).default(12000).volatile(),
     maxTranscriptMessages: S.number().min(5).max(400).default(40).volatile(),
     reviewTimeoutSec: S.number().min(30).default(300).volatile(),
-    suspectsTopN: S.number().min(0).max(10).default(3).volatile(),
-    catalogDescriptionMax: S.number().min(50).default(500).volatile(),
 
     signalTriggerEnabled: S.boolean().default(true).volatile(),
     signalToolFailureMin: S.number().min(0).default(3).volatile(),

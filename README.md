@@ -4,7 +4,7 @@ Hermes Agent's **self-evolution loop**, ported to [DeepSeek Harness](https://git
 
 > The agent gets better between sessions: it keeps a memory of who you are, saves what it learns as skills, reviews its own finished turns in the background, and curates the resulting library without ever deleting anything.
 
-- **Fidelity first.** The review/curator prompts and the four tool schemas are extracted **verbatim** from `NousResearch/hermes-agent@d923a5eb48` (v0.22.2). No paraphrase, no invented protocols. `scripts/extract_prompts.py` reproduces the artifacts.
+- **Fidelity first.** The review/curator prompts and the four tool schemas are extracted **verbatim** from `NousResearch/hermes-agent@d923a5eb48` (v0.22.2). No paraphrase, no invented protocols. `scripts/extract_prompts.py` reproduces the artifacts. [COMPATIBILITY.md](COMPATIBILITY.md) maps every Hermes module to its file here and lists every deviation the DSH runtime forces.
 - **Pluggable.** One dependency + one `dsh.profile.bundles` entry. Remove them and it is gone — no core patches, no forked DSH.
 - **Safe by construction.** Review and curator `delete` = **archive**. Read-before-write is enforced. Pinned and user-authored skills are never auto-transitioned. Approval mode stages writes for a human.
 
@@ -17,8 +17,8 @@ Hermes Agent's **self-evolution loop**, ported to [DeepSeek Harness](https://git
 | **Memory + user profile** | `$DSH_HOME/memories/MEMORY.md` (environment facts) and `USER.md` (who the user is), `§`-delimited entries, 2,200 / 1,375 char budgets, injected into every new session as a frozen snapshot | `tools/memory_tool.py`, `tools/memory_tool_store.py` |
 | **`memory` tool** | batch `operations` (add / replace / remove), exact Hermes error strings, injection-side threat screening | `tools/memory_tool.py` |
 | **Skill library** | `$DSH_HOME/skills/<name>/SKILL.md` plus `references/`, `templates/`, `scripts/`, `assets/` support files; `skills_list` / `skill_view` / `skill_manage` with the original JSON Schemas | `tools/skills_tool.py`, `tools/skill_manager_tool.py` |
-| **Skill linter** | advisory checks: oversized body, incident-log shape, references sprawl, dangling references (only new violations are reported) | `tools/skill_linter.py` |
-| **Background review fork** | after a sufficiently long turn, an in-process subagent replays the transcript with the Hermes review prompt and saves lessons through the tools | `agent/background_review.py`, `agent/turn_finalizer.py` |
+| **Skill linter** | all 15 advisory rules from Hermes (name format, marketing words, missing metadata, oversized body, shell-utility prose, incident-log shape, dangling links, POSIX gating, forbidden files, references sprawl …); only new violations are reported | `tools/skill_linter.py` |
+| **Background review fork** | after a sufficiently long turn, an in-process subagent replays the transcript and receives the Hermes review prompt **as its user message** (system prompt untouched, like upstream); it saves lessons through the tools | `agent/background_review.py`, `agent/turn_finalizer.py` |
 | **Coach prompts** | Hermes' `## Skills` and memory guidance sections, so the model records lessons instead of narrating them | `agent/prompt_builder.py` |
 | **Curator** | deterministic inactivity transitions (`active` → `stale` → `archived`), seeded first run, lock file, backups, ledger; opt-in LLM umbrella-consolidation pass with reconciliation | `agent/curator.py`, `agent/curator_backup.py` |
 | **Web panel** | `/hermes-evolve` page + `/hermes-evolve/api` JSON: status, memory, skills, pending approvals, backups/restore, curator controls, live settings | — (DSH `webServer` route) |
@@ -103,9 +103,8 @@ Every option is a `.volatile()` schemastery field and can be changed live from t
 | --- | --- | --- |
 | `enabled` | `true` | master switch for the background loop |
 | `mode` | `auto` | `auto` \| `approval` \| `log-only` |
-| `turnInterval` | `10` | tool iterations before a skill review |
-| `toolCallInterval` | `10` | alias kept for parity with earlier builds |
-| `cooldownMinutes` | `30` | minimum gap between reviews per session |
+| `skillNudgeInterval` | `10` | tool iterations before a skill review (hermes `agent.skills.creation_nudge_interval`) |
+| `memoryNudgeInterval` | `10` | user turns before a memory review (hermes `memory.nudge_interval`) |
 | `reviewTimeoutSec` | `300` | fork timeout |
 | `provider` / `model` | `''` | aux model for the fork; empty = host default |
 | `memoryCharLimit` / `userCharLimit` | `2200` / `1375` | Hermes budgets |
@@ -144,13 +143,13 @@ the ported Hermes semantics always apply inside those passes.
 3. **Read-before-write.** A patch or overwrite must be preceded by a `skill_view` of that exact file in the same review turn. Refusals behave like Hermes: view once, retry once, do not loop.
 4. **No prompt-cache mutation.** Memory is rendered as a per-session frozen snapshot and skills are never reloaded into an existing prompt; everything that enters a running session does so as a message or tool result.
 5. **Corrupt state fails safe.** Unparseable usage records, timestamps, or curator state mean "do nothing", never "archive everything".
-6. **Approval mode stages.** In `approval` mode the fork cannot write: it returns the intended change and the plugin stores it under `pending/` for a human decision.
+6. **Unattended writes are gated.** Memory `replace`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). In `approval` mode the fork cannot write at all: it describes the intended change instead.
 
 ## Development
 
 ```bash
 npm install
-npm test          # 45 tests, no network, no host required
+npm test          # 49 tests, no network, no host required
 npm run check     # syntax + artifact + export-surface checks
 ```
 
@@ -165,13 +164,14 @@ src/skill_store.js    skill package scan, validation, ledger, archive, backups
 src/skill_usage.js    .usage.json sidecar + transition state machine
 src/skill_linter.js   advisory linter
 src/memory.js         §-format store, budgets, injection snapshot
-src/prompts.js        Hermes prompt assembly + language directive
+src/prompts.js        Hermes prompt texts + hermes-shaped message builders
 src/prompts.hermes.json  extracted verbatim prompt texts (do not edit)
 src/schemas.hermes.json  extracted verbatim tool schemas (do not edit)
 src/panel.js          /hermes-evolve page + JSON API
 scripts/extract_prompts.py   regenerates the prompt artifacts from a hermes checkout
 scripts/extract_schemas.py   regenerates the tool schemas (JSON + CJS mirror)
 scripts/check.js             offline syntax / artifact / export-surface checks
+COMPATIBILITY.md             module-by-module fidelity map and runtime deviations
 ```
 
 To re-extract the Hermes artifacts against another release:

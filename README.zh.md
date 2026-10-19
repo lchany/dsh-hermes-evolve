@@ -4,7 +4,7 @@
 
 > 让 agent 在会话之间变强：记住你是谁、把学到的东西沉淀成技能、回合结束后在后台复盘自己的表现、并且只归档不删除地维护技能库。
 
-- **保真优先。** 复盘/策展提示词与四个工具 schema 都从 `NousResearch/hermes-agent@d923a5eb48`（v0.22.2）**逐字**抽取，不改写、不发明协议。`scripts/extract_prompts.py` 可复现。
+- **保真优先。** 复盘/策展提示词与四个工具 schema 都从 `NousResearch/hermes-agent@d923a5eb48`（v0.22.2）**逐字**抽取，不改写、不发明协议。`scripts/extract_prompts.py` 可复现。每个 hermes 模块对应的文件、以及 DSH 运行时不得不改的每一处偏差，见 [COMPATIBILITY.md](COMPATIBILITY.md)。
 - **可插拔。** profile 里加一条依赖 + 一条 `dsh.profile.bundles`；删掉即彻底移除，不改 DSH 核心。
 - **默认保守。** 复盘与策展里的 `delete` 一律变成**归档**；写前必读（read-before-write）强制；pinned 与用户自建技能永不被自动转移；approval 模式下写入先挂起等人确认。
 
@@ -101,8 +101,8 @@ npm install file:/absolute/path/to/dsh-hermes-evolve
 | --- | --- | --- |
 | `enabled` | `true` | 后台闭环总开关 |
 | `mode` | `auto` | `auto` / `approval` / `log-only` |
-| `turnInterval` | `10` | 多少轮工具迭代触发一次技能复盘 |
-| `cooldownMinutes` | `30` | 同会话两次复盘的最小间隔 |
+| `skillNudgeInterval` | `10` | 多少轮工具迭代触发一次技能复盘（hermes `agent.skills.creation_nudge_interval`） |
+| `memoryNudgeInterval` | `10` | 多少个用户轮次触发一次记忆复盘（hermes `memory.nudge_interval`） |
 | `reviewTimeoutSec` | `300` | fork 超时 |
 | `provider` / `model` | `''` | 复盘用辅助模型；空 = 宿主默认 |
 | `memoryCharLimit` / `userCharLimit` | `2200` / `1375` | Hermes 预算 |
@@ -138,13 +138,13 @@ profile 可能已经提供技能工具（`skills_list` / `skill_view` / `skill_m
 3. **写前必读。** patch/覆盖支撑文件前，必须在同一次复盘回合内 `skill_view` 过那个文件；拒绝后按 Hermes 的行为：view 一次、重试一次、不要循环。
 4. **不动 prompt cache。** 记忆以每会话冻结快照注入，技能不会在会话中途重载；进入运行中会话的内容一律走 message 或 tool result。
 5. **坏状态即不动。** usage 记录、时间戳、curator state 解析失败时一律"什么都不做"，绝不"全库归档"。
-6. **approval 模式挂起。** 复盘不能直接落盘，只返回意图变更，插件存到 `pending/` 等人审。
+6. **无人值守的写入受门控。** 后台复盘的记忆 `replace`/`remove` 一律挂到 `pending/` 等人审（hermes #105921；`add` 仍直接落盘）。`approval` 模式下复盘完全不能写，只描述意图变更。
 
 ## 开发
 
 ```bash
 npm install
-npm test          # 45 个测试，无网络、不依赖宿主
+npm test          # 49 个测试，无网络、不依赖宿主
 npm run check     # 语法 + 抽取产物 + 导出面检查
 ```
 

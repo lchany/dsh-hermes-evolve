@@ -94,6 +94,15 @@ if (pkg.dsh?.bundle?.patch === undefined) fail('package.json lost dsh.bundle.pat
 if (!readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8').includes('dsh-hermes-evolve')) fail('cordis.patch.yml does not reference the package')
 ok('bundle patch is wired')
 
+const { existsSync } = require('node:fs')
+for (const name of pkg.files || []) {
+  if (!existsSync(join(ROOT, name))) fail(`package.json lists ${name} but it does not exist`)
+}
+if (!existsSync(join(ROOT, 'COMPATIBILITY.md'))) fail('COMPATIBILITY.md is missing')
+const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
+if (!changelog.includes(`## [${pkg.version}]`)) fail(`CHANGELOG.md has no section for ${pkg.version}`)
+ok('packaged files exist and the changelog matches the version')
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
   process.exit(1)

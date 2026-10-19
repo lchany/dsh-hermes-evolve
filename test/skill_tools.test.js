@@ -6,6 +6,7 @@ const { join } = require('node:path')
 const { readFile, access } = require('node:fs/promises')
 
 const { buildToolSet } = require('../src/skill_tools')
+const store = require('../src/skill_store')
 const { withHome } = require('./helpers')
 
 const SKILL_MD = `---
@@ -122,3 +123,36 @@ test('skills_list reports the catalog in hermes shape', async () => {
 async function exists (path) {
   try { await access(path); return true } catch { return false }
 }
+test('an unattended fork may add memory but never replace/remove it', async () => {
+  await withHome(async (home) => {
+    const tools = buildToolSet({ unattendedMemory: true, memoryCharLimit: 2200, userCharLimit: 1375 })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+
+    const added = JSON.parse(await memoryTool.execute({ target: 'user', action: 'add', content: 'Prefers terse answers.' }, exec))
+    assert.equal(added.success, true)
+    assert.equal(added.staged, undefined)
+
+    const staged = JSON.parse(await memoryTool.execute({ target: 'user', action: 'replace', old_text: 'terse', content: 'Prefers verbose answers.' }, exec))
+    assert.equal(staged.success, true)
+    assert.equal(staged.staged, true)
+    assert.equal(staged.proposal_staged, true)
+    assert.match(staged.message, /staged for your approval/)
+
+    const pending = await store.listPending()
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0].kind, 'memory')
+    assert.equal(pending[0].target, 'user')
+    assert.equal(pending[0].operations[0].action, 'replace')
+
+    // The entry on disk is unchanged: staging never applies silently.
+    const raw = await readFile(join(home, 'memories', 'USER.md'), 'utf8')
+    assert.match(raw, /Prefers terse answers\./)
+    assert.doesNotMatch(raw, /verbose/)
+  })
+})
+
+test('includeMemory=false removes the memory tool from the fork surface', () => {
+  const names = buildToolSet({ includeMemory: false }).map((tool) => tool.name)
+  assert.deepEqual(names, ['skills_list', 'skill_view', 'skill_manage'])
+})

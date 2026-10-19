@@ -79,7 +79,7 @@ test('the package exports the plugin shape the host expects', () => {
 test('apply() wires prompts, tools, session subscription and the panel', async () => {
   await withHome(async () => {
     const { ctx, sections, contexts, tools, injected, listeners } = fakeContext()
-    plugin.apply(ctx, { turnInterval: 3 })
+    plugin.apply(ctx, { skillNudgeInterval: 3 })
 
     const sectionNames = sections.map((section) => section.name)
     assert.ok(sectionNames.includes('hermes-evolve:memory-guidance'))
@@ -106,11 +106,11 @@ test('apply() wires prompts, tools, session subscription and the panel', async (
 
 test('settings writes are folded into the live object', async () => {
   await withHome(async () => {
-    const store = { value: { turnInterval: 7 } }
+    const store = { value: { skillNudgeInterval: 7 } }
     const { ctx, listeners } = fakeContext()
     ctx.settings.describe = () => [{ ns: 'hermes-evolve', value: store.value, revision: 2 }]
     plugin.apply(ctx, {})
-    store.value = { turnInterval: 42 }
+    store.value = { skillNudgeInterval: 42 }
     const handlers = listeners.get('settings/document-updated') || []
     assert.equal(handlers.length, 1)
     handlers[0]('hermes-evolve')
@@ -135,7 +135,7 @@ test('sanitizeConfig drops host-materialised volatile placeholders', () => {
   const { sanitizeConfig } = plugin.__internals
   // dsh 0.2.0-rc.2 hands the apply-config `.volatile()` fields back as `{}`.
   assert.deepEqual(
-    sanitizeConfig({ mode: {}, curatorEnabled: {}, turnInterval: '7', model: 'x' }),
+    sanitizeConfig({ mode: {}, curatorEnabled: {}, skillNudgeInterval: '7', model: 'x' }),
     { model: 'x' },
   )
   // A scalar default only accepts scalars.
@@ -150,10 +150,10 @@ test('a materialised placeholder never reaches consumers', async () => {
   await withHome(async () => {
     const lines = []
     const { ctx } = fakeContext({
-      settingsValues: { mode: {}, turnInterval: {}, curatorEnabled: {} },
+      settingsValues: { mode: {}, skillNudgeInterval: {}, curatorEnabled: {} },
     })
     ctx.logger = { info: (line) => lines.push(line), warn: () => {}, debug: () => {} }
-    plugin.apply(ctx, { mode: {}, turnInterval: {}, provider: {} })
+    plugin.apply(ctx, { mode: {}, skillNudgeInterval: {}, provider: {} })
     const boot = lines.find((line) => line.includes('active —'))
     assert.ok(boot, 'boot line is logged')
     assert.match(boot, /mode=auto/)

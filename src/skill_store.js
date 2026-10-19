@@ -41,42 +41,97 @@ const SUPPORT_FILE_MAX_CHARS = 64 * 1024
 /** Parse the YAML frontmatter Hermes skills use. Deliberately a subset: top-level
  *  `key: value` scalars plus indented/`-` nested blocks serialized back as JSON
  *  strings, which round-trips through `mergeFrontmatter`. */
+/** Parse a YAML scalar: inline flow list, boolean/null, quoted or bare string. */
+function parseScalar (raw) {
+  const value = String(raw || '').trim()
+  if (value.startsWith('[') && value.endsWith(']')) {
+    const inner = value.slice(1, -1).trim()
+    if (inner === '') return []
+    return inner.split(',').map((item) => unquote(item.trim()))
+  }
+  const bare = unquote(value)
+  if (bare === 'true') return true
+  if (bare === 'false') return false
+  if (bare === 'null') return null
+  return bare
+}
+
+function indentOf (line) {
+  const match = line.match(/^(\s*)/)
+  return match === null ? 0 : match[1].length
+}
+
+function nextContentLine (lines, from) {
+  for (let index = from; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line.trim() === '' || /^\s*#/.test(line)) continue
+    return index
+  }
+  return -1
+}
+
+/**
+ * Parse one YAML node (map or list) starting at `start` whose keys sit at
+ * `indent`. Supports the subset skills actually use: nested maps
+ * (`metadata.hermes.tags`) and block lists of scalars.
+ */
+function parseYamlNode (lines, start, indent) {
+  const first = nextContentLine(lines, start)
+  if (first === -1) return { value: {}, next: start }
+  if (indentOf(lines[first]) === indent && /^\s*-\s/.test(lines[first])) {
+    const array = []
+    let index = first
+    while (index < lines.length) {
+      const line = lines[index]
+      if (line.trim() === '' || /^\s*#/.test(line)) { index += 1; continue }
+      if (indentOf(line) !== indent || !/^\s*-\s/.test(line)) break
+      array.push(parseScalar(line.replace(/^\s*-\s*/, '').trim()))
+      index += 1
+    }
+    return { value: array, next: index }
+  }
+  const object = {}
+  let index = first
+  while (index < lines.length) {
+    const line = lines[index]
+    if (line.trim() === '' || /^\s*#/.test(line)) { index += 1; continue }
+    const lineIndent = indentOf(line)
+    if (lineIndent < indent) break
+    if (lineIndent > indent) { index += 1; continue }
+    const match = line.match(/^\s*([A-Za-z0-9_.-]+):\s*(.*)$/)
+    if (match === null) { index += 1; continue }
+    const key = match[1]
+    const rest = match[2].trim()
+    if (rest !== '') {
+      object[key] = parseScalar(rest)
+      index += 1
+      continue
+    }
+    const childFirst = nextContentLine(lines, index + 1)
+    if (childFirst === -1 || indentOf(lines[childFirst]) <= indent) {
+      object[key] = {}
+      index += 1
+      continue
+    }
+    const child = parseYamlNode(lines, childFirst, indentOf(lines[childFirst]))
+    object[key] = child.value
+    index = child.next
+  }
+  return { value: object, next: index }
+}
+
 function parseFrontmatter (raw) {
   const text = String(raw || '')
   const lines = text.split(/\r?\n/)
   if (lines[0] === undefined || lines[0].trim() !== '---') return { frontmatter: {}, body: text }
-  const closer = lines.findIndex((l, i) => i > 0 && l.trim() === '---')
+  const closer = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
   if (closer < 0) return { frontmatter: {}, body: text }
   const block = lines.slice(1, closer)
+  const parsed = parseYamlNode(block, 0, 0)
+  const frontmatter = parsed.value !== null && typeof parsed.value === 'object' && !Array.isArray(parsed.value)
+    ? parsed.value
+    : {}
   const body = lines.slice(closer + 1).join('\n').replace(/^\n+/, '')
-  const frontmatter = {}
-  let currentKey = null
-  for (const line of block) {
-    if (line.trim() === '' || /^\s*#/.test(line)) continue
-    const top = line.match(/^([A-Za-z0-9_.-]+):\s*(.*)$/)
-    if (top !== null) {
-      const [, key, rest] = top
-      let value = rest.trim()
-      if (value === '') {
-        currentKey = key
-        frontmatter[key] = {}
-        continue
-      }
-      currentKey = null
-      frontmatter[key] = unquote(value)
-      continue
-    }
-    const nested = line.match(/^\s+([A-Za-z0-9_.-]+):\s*(.*)$/)
-    if (nested !== null && currentKey !== null && typeof frontmatter[currentKey] === 'object') {
-      frontmatter[currentKey][nested[1]] = unquote(nested[2].trim())
-      continue
-    }
-    if (/^\s*-/.test(line) && currentKey !== null) {
-      const item = unquote(line.replace(/^\s*-\s*/, '').trim())
-      if (!Array.isArray(frontmatter[currentKey])) frontmatter[currentKey] = []
-      frontmatter[currentKey].push(item)
-    }
-  }
   return { frontmatter, body }
 }
 
@@ -90,21 +145,33 @@ function unquote (value) {
   return text
 }
 
-function serializeFrontmatter (frontmatter) {
+function yamlScalar (value) {
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return 'null'
+  return JSON.stringify(String(value))
+}
+
+function serializeNode (value, indent) {
+  const pad = ' '.repeat(indent)
+  if (Array.isArray(value)) {
+    return value.map((item) => (item !== null && typeof item === 'object'
+      ? `${pad}- ${serializeNode(item, indent + 2).join('\n').trimStart()}`
+      : `${pad}- ${yamlScalar(item)}`))
+  }
   const lines = []
-  for (const [key, value] of Object.entries(frontmatter || {})) {
-    if (value === undefined || value === null) continue
-    if (Array.isArray(value)) {
-      lines.push(`${key}:`)
-      for (const item of value) lines.push(`  - ${JSON.stringify(String(item))}`)
-    } else if (typeof value === 'object') {
-      lines.push(`${key}:`)
-      for (const [k, v] of Object.entries(value)) lines.push(`  ${k}: ${JSON.stringify(String(v))}`)
+  for (const [key, item] of Object.entries(value || {})) {
+    if (item === undefined) continue
+    if (item !== null && typeof item === 'object') {
+      lines.push(`${pad}${key}:`, ...serializeNode(item, indent + 2))
     } else {
-      lines.push(`${key}: ${JSON.stringify(String(value))}`)
+      lines.push(`${pad}${key}: ${yamlScalar(item)}`)
     }
   }
-  return lines.join('\n')
+  return lines
+}
+
+function serializeFrontmatter (frontmatter) {
+  return serializeNode(frontmatter || {}, 0).join('\n')
 }
 
 function composeSkillMd (frontmatter, body) {
@@ -450,6 +517,18 @@ async function stagePending (record) {
   return row
 }
 
+/** Mark a staged proposal decided, keeping the payload for audit. */
+async function markPending (id, status, extra = {}) {
+  const path = join(pendingDir(), `${id}.json`)
+  const raw = await readFileSafe(path)
+  if (raw === undefined) return { ok: false, error: `pending write '${id}' not found` }
+  let row
+  try { row = JSON.parse(raw) } catch { return { ok: false, error: `pending write '${id}' is corrupt` } }
+  const next = { ...row, ...extra, status, decided_at: isoNow() }
+  await atomicWriteJson(path, next)
+  return { ok: true, record: next }
+}
+
 async function listPending () {
   const dir = pendingDir()
   if (!(await exists(dir))) return []
@@ -506,6 +585,7 @@ module.exports = {
   stagePending,
   listPending,
   resolvePending,
+  markPending,
   archiveRoot: archiveDir,
   truncated: truncate,
   sha256,
