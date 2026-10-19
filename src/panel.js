@@ -16,6 +16,7 @@ const path = require('node:path')
 const util = require('./util')
 const memory = require('./memory')
 const store = require('./skill_store')
+const { DEFAULTS } = require('./const')
 const usageMod = require('./skill_usage')
 
 const API_PREFIX = '/hermes-evolve/api'
@@ -189,14 +190,18 @@ function registerPanelRoutes (webServerCtx, deps) {
             util.memoryDir(),
             record.target === 'user' ? 'user' : 'memory',
             Array.isArray(record.operations) ? record.operations : [],
-            { limit: Number.isFinite(record.limit) ? record.limit : undefined },
+            {
+              limit: Number.isFinite(record.limit)
+                ? record.limit
+                : (record.target === 'user' ? DEFAULTS.userCharLimit : DEFAULTS.memoryCharLimit),
+            },
           )
           if (applied.ok !== true) {
             sendJson(res, 409, { ok: false, applied, record })
             return
           }
           const marked = await store.markPending(record.id, 'approved', { applied: true })
-          sendJson(res, 200, { ok: true, applied, record: marked.record })
+          sendJson(res, 200, { ok: true, applied: true, result: applied, record: marked.record })
           return
         }
         const marked = await store.markPending(record.id, decision === 'approved' ? 'approved' : 'rejected')
