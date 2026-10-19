@@ -52,7 +52,7 @@ loop, ported to DeepSeek Harness as a market-style pluggable plugin.
   apply-config (measured on dsh 0.2.0-rc.2); those placeholders are now filtered
   by shape so they can no longer overwrite defaults (`mode` showed up as
   `[object Object]` in the boot log).
-- **Tests** — 44 tests covering the memory store, usage transitions, tool
+- **Tests** — 45 tests covering the memory store, usage transitions, tool
   handlers, curator passes, prompt fidelity, the review scheduler, and plugin
   boot.
 

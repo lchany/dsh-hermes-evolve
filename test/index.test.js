@@ -192,3 +192,19 @@ test('registerTools=off registers nothing globally', async () => {
     assert.equal(tools.length, 0)
   })
 })
+
+test('a registration race degrades instead of throwing', async () => {
+  await withHome(async () => {
+    const { ctx, tools } = fakeContext()
+    const realRegister = ctx.tools.register
+    ctx.tools.register = (definition) => {
+      if (definition.name === 'memory') throw new Error('duplicate tool memory')
+      return realRegister(definition)
+    }
+    const warnings = []
+    ctx.logger = { info: () => {}, warn: (line) => warnings.push(line), debug: () => {} }
+    plugin.apply(ctx, {})
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), ['skill_manage', 'skill_view', 'skills_list'])
+    assert.ok(warnings.some((line) => /cannot register memory/.test(line)))
+  })
+})

@@ -262,7 +262,15 @@ function apply (ctx, config = {}) {
     for (const definition of skillTools.buildToolSet({ resolveContext: resolveToolContext })) {
       if (definition.name === 'memory' && foreignMemory) { skipped.push('memory'); continue }
       if (!ownTool(definition.name)) { skipped.push(definition.name); continue }
-      disposers.push(ctx.tools.register(definition))
+      try {
+        disposers.push(ctx.tools.register(definition))
+      } catch (error) {
+        // Another plugin may claim the name between our probe and this call
+        // (mount order is not guaranteed). Losing one tool must not take the
+        // whole plugin — and the session — down.
+        skipped.push(definition.name)
+        logger.warn?.(`[${PLUGIN}] cannot register ${definition.name}: ${error && error.message ? error.message : error}`)
+      }
     }
     if (skipped.length > 0) {
       logger.info?.(`[${PLUGIN}] left ${skipped.join(', ')} to the host profile`)
