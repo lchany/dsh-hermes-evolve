@@ -57,6 +57,8 @@ const DEFAULTS = {
   coachingMode: 'full',
 
   // ── skill authoring ──────────────────────────────────────────────────────
+  registerTools: 'auto', // auto | off — claim only tool names nobody else owns
+  respectForeignMemory: true, // another memory plugin owns `memory` -> stay out of its way
   supportFilesEnabled: true, // references/ templates/ scripts/ assets/
   maxSupportFileChars: 65536,
   maxBodyChars: 131072,
@@ -130,6 +132,8 @@ function settingsSchema (S) {
     coachingEnabled: S.boolean().default(true).volatile(),
     coachingMode: S.union(['full', 'patch-only', 'off']).default('full').volatile(),
 
+    registerTools: S.union(['auto', 'off']).default('auto').volatile(),
+    respectForeignMemory: S.boolean().default(true).volatile(),
     supportFilesEnabled: S.boolean().default(true).volatile(),
     maxSupportFileChars: S.number().min(1024).default(65536).volatile(),
     maxBodyChars: S.number().min(4096).default(131072).volatile(),

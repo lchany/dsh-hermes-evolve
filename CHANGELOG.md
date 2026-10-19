@@ -45,7 +45,14 @@ loop, ported to DeepSeek Harness as a market-style pluggable plugin.
   JSON API under `/hermes-evolve/api`.
 - **Settings page** — every option is a `.volatile()` schemastery field, so the
   host projects it into the GUI without a custom client bundle.
-- **Tests** — 40 tests covering the memory store, usage transitions, tool
+- **Coexistence** — `registerTools` (`auto`/`off`) claims only free global tool
+  names; `respectForeignMemory` backs off when another plugin owns `memory`;
+  the coaching section is gated on a reachable `skill_manage`.
+- **Fix** — the host materialises `.volatile()` config fields as `{}` in the
+  apply-config (measured on dsh 0.2.0-rc.2); those placeholders are now filtered
+  by shape so they can no longer overwrite defaults (`mode` showed up as
+  `[object Object]` in the boot log).
+- **Tests** — 44 tests covering the memory store, usage transitions, tool
   handlers, curator passes, prompt fidelity, the review scheduler, and plugin
   boot.
 

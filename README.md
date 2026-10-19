@@ -123,6 +123,20 @@ Every option is a `.volatile()` schemastery field and can be changed live from t
 
 The full list, including `SUSPECTS_TOP_N`, transcript caps and correction words, is in [`src/const.js`](src/const.js).
 
+## Living next to other plugins
+
+A profile can already provide skill tools (`skills_list` / `skill_view` /
+`skill_manage`) or a `memory` tool from another plugin. Two plugins cannot own
+the same global tool name, so `registerTools: 'auto'` claims only the names that
+are still free, logs the ones it left alone, and — while `respectForeignMemory`
+is on — skips its own memory tool and snapshot when a foreign `memory` tool is
+present. The coaching section is only injected while a `skill_manage` tool is
+actually reachable.
+
+The **background review and curator forks are unaffected**: they register their
+tools in the spawned agent's own scope (where scoped tools shadow globals), so
+the ported Hermes semantics always apply inside those passes.
+
 ## Invariants (the parts that are deliberately conservative)
 
 1. **Never delete.** `skill_manage(action='delete')` archives the whole package to `$DSH_HOME/skills/.archive/<name>`, refreshes its mtime, and appends a ledger entry. The curator can only archive. There is no purge path.
@@ -136,7 +150,7 @@ The full list, including `SUSPECTS_TOP_N`, transcript caps and correction words,
 
 ```bash
 npm install
-npm test          # 40 tests, no network, no host required
+npm test          # 44 tests, no network, no host required
 npm run check     # syntax + artifact + export-surface checks
 ```
 

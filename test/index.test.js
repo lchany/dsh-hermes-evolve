@@ -131,3 +131,64 @@ test('boot does not create skills or memory files on its own', async () => {
     assert.ok(!entries.includes('memories'), 'boot must not create the memory directory')
   })
 })
+test('sanitizeConfig drops host-materialised volatile placeholders', () => {
+  const { sanitizeConfig } = plugin.__internals
+  // dsh 0.2.0-rc.2 hands the apply-config `.volatile()` fields back as `{}`.
+  assert.deepEqual(
+    sanitizeConfig({ mode: {}, curatorEnabled: {}, turnInterval: '7', model: 'x' }),
+    { model: 'x' },
+  )
+  // A scalar default only accepts scalars.
+  assert.deepEqual(sanitizeConfig({ signalCorrectionWords: 'a,b' }), { signalCorrectionWords: 'a,b' })
+  assert.deepEqual(sanitizeConfig({ memoryCharLimit: 3000 }), { memoryCharLimit: 3000 })
+  assert.deepEqual(sanitizeConfig({ memoryCharLimit: '3000' }), {})
+  assert.deepEqual(sanitizeConfig({ unknownKey: 1 }), {})
+  assert.deepEqual(sanitizeConfig(null), {})
+})
+
+test('a materialised placeholder never reaches consumers', async () => {
+  await withHome(async () => {
+    const lines = []
+    const { ctx } = fakeContext({
+      settingsValues: { mode: {}, turnInterval: {}, curatorEnabled: {} },
+    })
+    ctx.logger = { info: (line) => lines.push(line), warn: () => {}, debug: () => {} }
+    plugin.apply(ctx, { mode: {}, turnInterval: {}, provider: {} })
+    const boot = lines.find((line) => line.includes('active —'))
+    assert.ok(boot, 'boot line is logged')
+    assert.match(boot, /mode=auto/)
+    assert.match(boot, /curator=on/)
+  })
+})
+
+test('a profile that already owns skill/memory tools keeps its own', async () => {
+  await withHome(async () => {
+    const { ctx, tools } = fakeContext()
+    ctx.tools.schemas = () => [
+      { name: 'skills_list' },
+      { name: 'skill_view' },
+      { name: 'skill_manage' },
+      { name: 'memory' },
+      { name: 'read' },
+    ]
+    const lines = []
+    ctx.logger = { info: (line) => lines.push(line), warn: () => {}, debug: () => {} }
+    plugin.apply(ctx, {})
+    assert.deepEqual(tools.map((tool) => tool.name), [], 'nothing may be registered over an occupied name')
+    assert.ok(lines.some((line) => /left .*memory/.test(line)), 'the skip is logged')
+
+    // With no foreign memory tool the plugin claims all four again.
+    const second = fakeContext()
+    plugin.apply(second.ctx, {})
+    assert.deepEqual(second.tools.map((tool) => tool.name).sort(),
+      ['memory', 'skill_manage', 'skill_view', 'skills_list'])
+  })
+})
+
+test('registerTools=off registers nothing globally', async () => {
+  await withHome(async () => {
+    const { ctx, tools } = fakeContext()
+    plugin.apply(ctx, { registerTools: 'off' })
+    assert.equal(tools.length, 0)
+  })
+})

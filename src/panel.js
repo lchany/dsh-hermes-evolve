@@ -71,7 +71,7 @@ const EDITABLE_SETTINGS = [
   'signalTriggerEnabled', 'signalToolFailureMin',
   'memoryInjectionEnabled', 'memoryEnabled', 'userProfileEnabled',
   'coachingEnabled', 'coachingMode',
-  'linterEnabled', 'ledgerEnabled',
+  'linterEnabled', 'ledgerEnabled', 'registerTools', 'respectForeignMemory',
   'curatorEnabled', 'curatorConsolidate', 'curatorIntervalHours',
   'curatorMinIdleHours', 'curatorStaleDays', 'curatorArchiveDays', 'curatorBackupKeep',
 ]

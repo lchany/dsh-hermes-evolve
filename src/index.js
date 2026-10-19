@@ -70,7 +70,18 @@ function sanitizeConfig (raw) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return out
   for (const [key, value] of Object.entries(raw)) {
     if (value === undefined) continue
-    out[key] = value
+    const fallback = DEFAULTS[key]
+    // The host materialises `.volatile()` fields of the apply-config as `{}`
+    // once the settings document exists (measured on dsh 0.2.0-rc.2). Copying
+    // that `{}` over the default poisons every consumer until the projection
+    // lands, so only same-shaped values are accepted; the live document is
+    // merged through this same filter.
+    if (fallback === undefined) continue
+    if (Array.isArray(fallback)) {
+      if (Array.isArray(value)) out[key] = value
+      continue
+    }
+    if (typeof value === typeof fallback) out[key] = value
   }
   return out
 }
@@ -82,7 +93,7 @@ function resolveLang (ctx) {
     const descriptors = ctx.settings.describe()
     const locale = descriptors.find((entry) => entry.ns === 'locale')
     if (locale && locale.value !== null && typeof locale.value === 'object') {
-      for (const key of ['language', 'locale', 'lang', 'value']) {
+      for (const key of ['preference', 'language', 'locale', 'lang', 'value']) {
         const candidate = locale.value[key]
         if (typeof candidate === 'string' && candidate.trim() !== '') {
           return /^en/i.test(candidate.trim()) ? 'en' : 'zh'
@@ -107,7 +118,7 @@ function apply (ctx, config = {}) {
     try {
       const descriptor = ctx.settings.describe().find((entry) => entry.ns === SETTINGS_NS)
       if (descriptor !== undefined && descriptor.value !== null && typeof descriptor.value === 'object') {
-        Object.assign(settings, descriptor.value)
+        Object.assign(settings, sanitizeConfig(descriptor.value))
       }
     } catch { /* settings not ready yet */ }
   }
@@ -133,13 +144,28 @@ function apply (ctx, config = {}) {
     return () => { try { off() } catch { /* gone */ } }
   }, `${PLUGIN}: settings subscription`)
 
+  // ── coexistence with other capability plugins ───────────────────────────
+  //
+  // A profile may already provide skill or memory tools (dsh base ships skill
+  // tools; memory plugins ship `memory`). Registering a *global* tool with an
+  // occupied name throws, so `auto` claims only free names. The background
+  // review/curator forks register their tools in the agent's own scope, where
+  // ours shadow globals — so ported fidelity inside those passes is unaffected.
+  const existingToolNames = (() => {
+    try { return new Set(ctx.tools.schemas().map((schema) => schema.name)) } catch { return new Set() }
+  })()
+  const ownTool = (name) => settings.registerTools !== 'off' && !existingToolNames.has(name)
+  const foreignMemory = existingToolNames.has('memory') && settings.respectForeignMemory !== false
+  const injectMemory = () => settings.memoryInjectionEnabled !== false && !foreignMemory
+  const hasSkillManage = () => ownTool('skill_manage') || existingToolNames.has('skill_manage')
+
   // ── memory snapshot ─────────────────────────────────────────────────────
   let memoryText = ''
   const frozenMemory = new WeakMap()
 
   const refreshMemoryCache = async () => {
     try {
-      if (settings.memoryInjectionEnabled === false) {
+      if (!injectMemory()) {
         memoryText = ''
         return
       }
@@ -166,13 +192,15 @@ function apply (ctx, config = {}) {
     disposers.push(ctx.systemPrompt.section({
       name: `${PLUGIN}:memory-guidance`,
       order: 50,
-      text: () => (settings.memoryInjectionEnabled === false ? '' : prompts.memoryGuidance(true)),
+      text: () => (injectMemory() ? prompts.memoryGuidance(true) : ''),
     }))
     disposers.push(ctx.systemPrompt.section({
       name: `${PLUGIN}:skills-coaching`,
       order: 51,
       text: () => {
         if (settings.coachingEnabled === false) return ''
+        // Pointing the model at a tool nobody registered is worse than silence.
+        if (!hasSkillManage()) return ''
         return prompts.skillsCoaching(settings.coachingMode !== 'patch-only')
       },
     }))
@@ -230,8 +258,14 @@ function apply (ctx, config = {}) {
   }
   ctx.effect(() => {
     const disposers = []
+    const skipped = []
     for (const definition of skillTools.buildToolSet({ resolveContext: resolveToolContext })) {
+      if (definition.name === 'memory' && foreignMemory) { skipped.push('memory'); continue }
+      if (!ownTool(definition.name)) { skipped.push(definition.name); continue }
       disposers.push(ctx.tools.register(definition))
+    }
+    if (skipped.length > 0) {
+      logger.info?.(`[${PLUGIN}] left ${skipped.join(', ')} to the host profile`)
     }
     return () => {
       for (const dispose of disposers) { try { dispose() } catch { /* gone */ } }

@@ -120,6 +120,17 @@ npm install file:/absolute/path/to/dsh-hermes-evolve
 
 完整清单（含转写截断、嫌疑技能数、纠正词表）见 [`src/const.js`](src/const.js)。
 
+## 与其他插件共存
+
+profile 可能已经提供技能工具（`skills_list` / `skill_view` / `skill_manage`）
+或别的插件提供的 `memory` 工具。两个插件不能共享同一个全局工具名，所以
+`registerTools: 'auto'` 只接管仍然空闲的名字，并把让出的工具名写进日志；在
+`respectForeignMemory` 开启时，检测到外部 `memory` 工具就不接管记忆（不注入
+快照、不注册工具）。只有当确实有 `skill_manage` 可用时才注入技能教练段。
+
+**后台复盘与 curator 不受影响**：它们在派生 agent 自己的作用域里注册工具
+（作用域工具会遮蔽全局工具），所以那两条通道里始终是移植后的 Hermes 语义。
+
 ## 不变量（刻意保守的部分）
 
 1. **永不删除。** `skill_manage(action='delete')` 把整个技能包移到 `$DSH_HOME/skills/.archive/<name>`，刷新 mtime，并写账本。策展器最多也只能归档，没有 purge 路径。
@@ -133,7 +144,7 @@ npm install file:/absolute/path/to/dsh-hermes-evolve
 
 ```bash
 npm install
-npm test          # 40 个测试，无网络、不依赖宿主
+npm test          # 44 个测试，无网络、不依赖宿主
 npm run check     # 语法 + 抽取产物 + 导出面检查
 ```
 
