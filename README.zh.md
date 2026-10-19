@@ -39,7 +39,7 @@
 
 ```bash
 cd ~/.dsh/profiles/web
-npm install github:YOUR_GITHUB_USER/dsh-hermes-evolve
+npm install github:lchany/dsh-hermes-evolve
 ```
 
 然后编辑 `~/.dsh/profiles/web/package.json`：
@@ -47,7 +47,7 @@ npm install github:YOUR_GITHUB_USER/dsh-hermes-evolve
 ```json
 {
   "dependencies": {
-    "dsh-hermes-evolve": "github:YOUR_GITHUB_USER/dsh-hermes-evolve"
+    "dsh-hermes-evolve": "github:lchany/dsh-hermes-evolve"
   },
   "dsh": {
     "profile": {

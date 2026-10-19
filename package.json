@@ -17,11 +17,11 @@
   "author": "dsh-hermes-evolve contributors",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_GITHUB_USER/dsh-hermes-evolve.git"
+    "url": "git+https://github.com/lchany/dsh-hermes-evolve.git"
   },
-  "homepage": "https://github.com/YOUR_GITHUB_USER/dsh-hermes-evolve#readme",
+  "homepage": "https://github.com/lchany/dsh-hermes-evolve#readme",
   "bugs": {
-    "url": "https://github.com/YOUR_GITHUB_USER/dsh-hermes-evolve/issues"
+    "url": "https://github.com/lchany/dsh-hermes-evolve/issues"
   },
   "main": "src/index.js",
   "exports": {

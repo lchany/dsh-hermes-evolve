@@ -41,7 +41,7 @@ Add the plugin to your DSH profile and to the profile bundle list, then restart 
 
 ```bash
 cd ~/.dsh/profiles/web
-npm install github:YOUR_GITHUB_USER/dsh-hermes-evolve
+npm install github:lchany/dsh-hermes-evolve
 ```
 
 Edit `~/.dsh/profiles/web/package.json`:
@@ -49,7 +49,7 @@ Edit `~/.dsh/profiles/web/package.json`:
 ```json
 {
   "dependencies": {
-    "dsh-hermes-evolve": "github:YOUR_GITHUB_USER/dsh-hermes-evolve"
+    "dsh-hermes-evolve": "github:lchany/dsh-hermes-evolve"
   },
   "dsh": {
     "profile": {
