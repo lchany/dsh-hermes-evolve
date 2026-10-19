@@ -149,7 +149,7 @@ the ported Hermes semantics always apply inside those passes.
 
 ```bash
 npm install
-npm test          # 49 tests, no network, no host required
+npm test          # 52 tests, no network, no host required
 npm run check     # syntax + artifact + export-surface checks
 ```
 

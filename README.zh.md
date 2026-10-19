@@ -144,7 +144,7 @@ profile 可能已经提供技能工具（`skills_list` / `skill_view` / `skill_m
 
 ```bash
 npm install
-npm test          # 49 个测试，无网络、不依赖宿主
+npm test          # 52 个测试，无网络、不依赖宿主
 npm run check     # 语法 + 抽取产物 + 导出面检查
 ```
 

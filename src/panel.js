@@ -224,7 +224,8 @@ function registerPanelRoutes (webServerCtx, deps) {
 
       if (req.method === 'POST' && route === '/settings') {
         const body = await readBody(req)
-        const patch = body && typeof body.patch === 'object' && body.patch !== null ? body.patch : {}
+        // Accept both {patch:{...}} (the page's own call) and a flat object.
+        const patch = body && typeof body.patch === 'object' && body.patch !== null ? body.patch : (body || {})
         const cleaned = {}
         for (const [key, value] of Object.entries(patch)) {
           if (EDITABLE_SETTINGS.includes(key)) cleaned[key] = value
