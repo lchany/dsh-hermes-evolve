@@ -254,6 +254,12 @@ function apply (ctx, config = {}) {
       memoryCharLimit: settings.memoryCharLimit,
       userCharLimit: settings.userCharLimit,
       lang: settings.lang,
+      // Hermes' `on_memory_write`: announce applied native writes so an
+      // external provider (dsh-agentmemory) can mirror them. Emitted on the
+      // plugin context, so any listener in the host sees it.
+      onMemoryWrite: (rows) => {
+        try { ctx.emit('hermes-evolve/memory-write', { rows }) } catch { /* no listeners */ }
+      },
     })
   }
   ctx.effect(() => {
@@ -346,6 +352,18 @@ function apply (ctx, config = {}) {
         curatorStatus,
         runCuratorNow: (options) => curator.runNow({ hostCtx: ctx, settings, logger, ...options }),
         curatorModule: curator,
+        listTools: () => {
+          // `schemas()` is the only view a host-plane plugin gets of the
+          // composed global surface: its own tools, every MCP bridge, and other
+          // plugins' registrations.
+          try {
+            return (ctx.tools?.schemas?.() || [])
+              .map((schema) => schema && schema.name)
+              .filter(Boolean)
+          } catch {
+            return []
+          }
+        },
       })
       ctx.effect(() => dispose, `${PLUGIN}: panel routes`)
     })

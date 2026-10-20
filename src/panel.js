@@ -98,8 +98,19 @@ function registerPanelRoutes (webServerCtx, deps) {
     }
     let pending = []
     try { pending = await store.listPending() } catch { pending = [] }
+    // The registered tool surface is visible only by asking the registry, and it
+    // is what tells an operator whether this install owns `memory` and the skill
+    // tools, and which MCP bridges contributed the rest.
+    let tools = []
+    try { tools = typeof deps.listTools === 'function' ? deps.listTools() : [] } catch { tools = [] }
+    const mcpServers = {}
+    for (const name of tools) {
+      const match = /^mcp__([A-Za-z0-9_-]+)__/.exec(name)
+      if (match) mcpServers[match[1]] = (mcpServers[match[1]] || 0) + 1
+    }
     return {
       plugin: 'hermes-evolve',
+      tools: { count: tools.length, mcpServers, names: tools },
       version: require('../package.json').version,
       store: {
         dshHome: util.dshHome(),

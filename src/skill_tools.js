@@ -68,6 +68,10 @@ function toolContext (overrides = {}) {
     // rewrite existing ones — those are staged for a human instead.
     unattendedMemory: false,
     lang: 'zh',
+    // Hermes' provider hook `on_memory_write`: a host that owns the built-in
+    // store announces each applied operation so an external memory provider can
+    // mirror it. Null here means nobody is listening.
+    onMemoryWrite: null,
     ...overrides,
   }
 }
@@ -516,6 +520,7 @@ async function handleMemory (args, ctx) {
         return stagedMemoryEnvelope(row)
       }
       const outcome = await memory.writeMemory(memoryDir(), target, normalized, { limit })
+      if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
       return json(outcome.ok ? successEnvelope('batch') : failureEnvelope(outcome, target))
     }
     if (args && typeof args.action !== 'string') {
@@ -539,10 +544,35 @@ async function handleMemory (args, ctx) {
       return stagedMemoryEnvelope(row)
     }
     const outcome = await memory.writeMemory(memoryDir(), target, [{ action, text: content, oldText }], { limit })
+    if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
     return json(outcome.ok ? successEnvelope(action) : failureEnvelope(outcome, target))
   } catch (error) {
     return fail(String(error && error.message ? error.message : error))
   }
+}
+
+/** hermes `on_memory_write(action, target, content, metadata)` — one call per
+ *  applied operation, each seeing the preceding operation's result. No-ops and
+ *  failed writes are not announced; the provider must never learn a change that
+ *  did not land. */
+function notifyMemoryWrite (ctx, target, outcome) {
+  if (typeof ctx.onMemoryWrite !== 'function') return
+  const rows = []
+  for (const operation of Array.isArray(outcome.applied) ? outcome.applied : []) {
+    if (operation.noop === true) continue
+    const action = typeof operation.action === 'string' ? operation.action : ''
+    if (!['add', 'replace', 'remove'].includes(action)) continue
+    rows.push({
+      action,
+      target,
+      content: typeof operation.text === 'string' ? operation.text : '',
+      previous_content: typeof operation.previous === 'string' ? operation.previous : '',
+    })
+  }
+  if (rows.length === 0) return
+  try {
+    ctx.onMemoryWrite(rows)
+  } catch { /* a mirror is never worth failing the write for */ }
 }
 
 function successEnvelope (action) {

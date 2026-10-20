@@ -132,6 +132,11 @@ async function runReview (hostCtx, options) {
     memoryCharLimit: settings.memoryCharLimit,
     userCharLimit: settings.userCharLimit,
     includeMemory: memoryAllowed,
+    // Same announcement path as the foreground tool: a memory write that lands
+    // from the review fork is still a native write an external provider mirrors.
+    onMemoryWrite: (rows) => {
+      try { hostCtx.emit('hermes-evolve/memory-write', { rows }) } catch { /* no listeners */ }
+    },
     // The fork is unattended: memory replace/remove are staged for a human,
     // never applied silently (hermes #105921).
     unattendedMemory: true,

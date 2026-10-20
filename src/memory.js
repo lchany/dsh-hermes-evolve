@@ -313,7 +313,7 @@ async function writeMemory (dir, store, operations, { limit, header } = {}) {
       await atomicWrite(storeFile(dir, store), `${header}\n${current}`)
     }
   }
-  return { ok: true, entries: plan.entries, chars: plan.chars, limit }
+  return { ok: true, entries: plan.entries, applied: plan.applied, chars: plan.chars, limit }
 }
 
 module.exports = {
