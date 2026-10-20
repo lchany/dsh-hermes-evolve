@@ -76,6 +76,20 @@ test('an interrupted or empty turn never triggers a review', async () => {
   assert.equal(logs.length, 0)
 })
 
+test('recall blocks and review notices stay out of the review transcript', () => {
+  const messages = [
+    { role: 'user', content: [{ type: 'text', text: 'how do we deploy?' }], source: { kind: 'user' } },
+    { role: 'user', content: [{ type: 'text', text: '<memory-context>\n- deploy: token\n</memory-context>' }], source: { kind: 'agentmemory', form: 'recall' } },
+    { role: 'assistant', content: [{ type: 'text', text: 'use the token' }], source: { kind: 'model' } },
+    { role: 'user', content: [{ type: 'text', text: '[hermes-evolve] 背景复盘完成' }], source: { kind: 'hermes-evolve', form: 'notice' } },
+  ]
+  const rendered = review.renderTranscript(messages, { maxChars: 2000, maxMessages: 10 })
+  assert.match(rendered, /how do we deploy\?/)
+  assert.match(rendered, /use the token/)
+  assert.doesNotMatch(rendered, /memory-context/)
+  assert.doesNotMatch(rendered, /背景复盘完成/)
+})
+
 test('transcript rendering keeps the newest turns and labels roles', () => {
   const messages = []
   for (let index = 0; index < 60; index += 1) {

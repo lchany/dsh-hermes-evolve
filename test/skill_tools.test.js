@@ -144,6 +144,7 @@ test('an unattended fork may add memory but never replace/remove it', async () =
     assert.equal(pending[0].kind, 'memory')
     assert.equal(pending[0].target, 'user')
     assert.equal(pending[0].operations[0].action, 'replace')
+    assert.equal(pending[0].operations[0].matched_entry, 'Prefers terse answers.', 'an unattended stage pins the entry too (memory_tool.py:199)')
 
     // The entry on disk is unchanged: staging never applies silently.
     const raw = await readFile(join(home, 'memories', 'USER.md'), 'utf8')

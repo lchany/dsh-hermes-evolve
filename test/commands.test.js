@@ -179,6 +179,22 @@ test('/memory approve refuses a pinned entry that changed after staging', async 
   })
 })
 
+test('/memory approve refuses a destructive write staged before entry pinning', async () => {
+  await withHome(async (home) => {
+    await seedMemory(home, ['Old fact about the project'])
+    const row = await store.stagePending({
+      kind: 'memory', target: 'memory', limit: 2200, actor: 'background-review',
+      operations: [{ action: 'remove', oldText: 'Old fact' }],
+    })
+    const { deps } = makeDeps()
+    const result = await run(deps, 'memory', ` approve ${row.id}`)
+    assert.match(result.text, /^Approved 0 memory write\(s\)\./)
+    assert.match(result.text, /predates entry pinning/)
+    assert.deepEqual((await memory.readStore(join(home, 'memories'), 'memory')).entries, ['Old fact about the project'])
+    assert.equal((await store.listPending()).find((entry) => entry.id === row.id).status, 'pending')
+  })
+})
+
 test('/memory pending lists the matched entry so the approver sees the target', async () => {
   await withHome(async (home) => {
     await seedMemory(home, ['Secret plan'])
@@ -356,6 +372,42 @@ test('/refine starts a background review with the focus text', async () => {
     assert.equal(reviews[0].cwd, '/tmp/project')
     assert.equal(reviews[0].reviewMemory, true)
     assert.equal(reviews[0].reviewSkills, true)
+  })
+})
+
+test('/refine does not start a second review while one is running, and reports the first when done', async () => {
+  await withHome(async () => {
+    const appended = []
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const { deps, reviews } = makeDeps({
+      runReview: async (hostCtx, options) => {
+        reviews.push(options)
+        await gate
+        return { ok: true, summary: 'saved a skill', scope: { reviewMemory: true, reviewSkills: true }, durationMs: 1000 }
+      },
+    })
+    const agent = {
+      session: {
+        id: 'refine-dedupe-session',
+        deriveMessages: () => [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }],
+        header: { cwd: '/tmp/project' },
+        append: (type, message) => appended.push({ type, message }),
+      },
+    }
+    const first = await run(deps, 'refine', '', agent)
+    assert.match(first.text, /Reviewing this conversation in the background/)
+    const second = await run(deps, 'refine', '', agent)
+    assert.match(second.text, /already running/)
+    assert.equal(reviews.length, 1)
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(appended.length, 1)
+    assert.equal(appended[0].type, 'user/message')
+    assert.equal(appended[0].message.source.form, 'notice')
+    const third = await run(deps, 'refine', '', agent)
+    assert.match(third.text, /Reviewing this conversation in the background/, 'the slot is free again after completion')
+    release()
   })
 })
 

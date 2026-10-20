@@ -319,6 +319,10 @@ function sumReviewUsage (agent) {
 
 // ── scheduling (the counter half of turn_finalizer) ────────────────────────
 
+/** Sessions with a review fork running. Shared by the automatic scheduler and
+ *  `/refine`, so an on-demand review never races the post-turn one. */
+const inFlightSessions = new Set()
+
 /**
  * Per-session counters. hermes keeps these on the AIAgent instance; a host-plane
  * plugin sees every session's events, so the map is keyed by session id.
@@ -326,7 +330,7 @@ function sumReviewUsage (agent) {
 function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl }) {
   const doReview = typeof reviewImpl === 'function' ? reviewImpl : runReview
   const sessions = new Map()
-  const inFlight = new Set()
+  const inFlight = inFlightSessions
 
   function stateOf (sessionId) {
     let state = sessions.get(sessionId)
@@ -464,6 +468,8 @@ module.exports = {
   runReview,
   createScheduler,
   snapshotMessages,
+  appendReviewNotice,
+  inFlightSessions,
   contentToText,
   lastAssistantText,
   sumReviewUsage,

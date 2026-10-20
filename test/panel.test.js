@@ -95,7 +95,7 @@ test('an approved memory pending write reaches MEMORY.md', async () => {
       kind: 'memory',
       target: 'memory',
       limit: 2200,
-      operations: [{ action: 'replace', text: 'New fact', oldText: 'Old fact' }],
+      operations: [{ action: 'replace', text: 'New fact', oldText: 'Old fact', matched_entry: 'Old fact' }],
       actor: 'background-review',
     })
     const server = fakeServer()
@@ -107,6 +107,28 @@ test('an approved memory pending write reaches MEMORY.md', async () => {
     assert.deepEqual(stored.entries, ['New fact'])
     const pending = await store.listPending()
     assert.equal(pending[0].status, 'approved')
+  })
+})
+
+test('the panel refuses a destructive memory write that was never pinned or whose entry changed', async () => {
+  await withHome(async () => {
+    await memory.writeMemory(util.memoryDir(), 'memory', [{ action: 'add', text: 'Old fact', oldText: '' }], { limit: 2200 })
+    const legacy = await store.stagePending({
+      kind: 'memory', target: 'memory', limit: 2200, actor: 'background-review',
+      operations: [{ action: 'remove', oldText: 'Old fact' }],
+    })
+    const changed = await store.stagePending({
+      kind: 'memory', target: 'memory', limit: 2200, actor: 'background-review',
+      operations: [{ action: 'remove', oldText: 'Old', matched_entry: 'Some other entry' }],
+    })
+    const server = fakeServer()
+    panel.registerPanelRoutes(server, deps())
+    for (const row of [legacy, changed]) {
+      const outcome = await call(server.routes, 'POST', '/hermes-evolve/api/pending', { id: row.id, decision: 'approved' })
+      assert.equal(outcome.status, 409)
+    }
+    assert.deepEqual((await memory.readStore(util.memoryDir(), 'memory')).entries, ['Old fact'])
+    assert.ok((await store.listPending()).every((row) => row.status === 'pending'))
   })
 })
 

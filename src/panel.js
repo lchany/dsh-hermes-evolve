@@ -268,16 +268,11 @@ function registerPanelRoutes (webServerCtx, deps) {
         const record = outcome.record
         if (decision === 'approved' && record.kind === 'memory') {
           // hermes `/memory pending` approve: replay the staged operations.
-          const applied = await memory.writeMemory(
-            util.memoryDir(),
-            record.target === 'user' ? 'user' : 'memory',
-            Array.isArray(record.operations) ? record.operations : [],
-            {
-              limit: Number.isFinite(record.limit)
-                ? record.limit
-                : (record.target === 'user' ? DEFAULTS.userCharLimit : DEFAULTS.memoryCharLimit),
-            },
-          )
+          const applied = await skillTools.applyPendingMemory(record, {
+            limit: Number.isFinite(record.limit)
+              ? record.limit
+              : (record.target === 'user' ? DEFAULTS.userCharLimit : DEFAULTS.memoryCharLimit),
+          })
           if (applied.ok !== true) {
             sendJson(res, 409, { ok: false, applied, record })
             return

@@ -100,34 +100,8 @@ function changedEntries (outcome, kind) {
   return out
 }
 
-/**
- * Approving a pinned write against an entry that has since changed would land
- * the edit somewhere the approver never saw. Hermes pins the matched entry at
- * stage time and fails the write when it is gone; do the same instead of
- * letting `findEntry` re-match a lookalike string.
- */
-async function verifyPinnedEntries (row) {
-  const pinned = destructiveOps(row).filter((op) => typeof op.matched_entry === 'string')
-  if (pinned.length === 0) return undefined
-  const loaded = await memory.readStore(util.memoryDir(), row.target === 'user' ? 'user' : 'memory')
-  if (loaded.readFailed) return 'The memory file could not be read. Refusing to overwrite it.'
-  const entries = Array.isArray(loaded.entries) ? loaded.entries : []
-  for (const op of pinned) {
-    if (!entries.includes(op.matched_entry)) {
-      return 'The entry this change targets no longer exists — it was edited or removed after the write was staged. Reject this write and stage a new one.'
-    }
-  }
-  return undefined
-}
-
 async function applyMemoryPending (row) {
-  const stale = await verifyPinnedEntries(row)
-  if (stale !== undefined) return { ok: false, detail: stale }
-  const outcome = await memory.writeMemory(util.memoryDir(), row.target === 'user' ? 'user' : 'memory',
-    Array.isArray(row.operations) ? row.operations : [], {
-      limit: row.limit !== undefined ? row.limit : undefined,
-    })
-  return outcome
+  return skillTools.applyPendingMemory(row, { limit: row.limit !== undefined ? row.limit : undefined })
 }
 
 /** hermes `_approve`: replay each pending write, then report what it overwrote. */
@@ -564,7 +538,13 @@ async function handleRefineCommand (rawInput, invocation, deps) {
   if (messages.length === 0) {
     return { kind: 'success', text: 'Nothing to refine yet — the conversation is empty.' }
   }
+  const review = require('./review')
+  const sessionId = session !== null && session !== undefined && typeof session.id === 'string' ? session.id : ''
+  if (sessionId !== '' && review.inFlightSessions.has(sessionId)) {
+    return { kind: 'success', text: 'A review of this conversation is already running — its result will be reported when done.' }
+  }
   try {
+    if (sessionId !== '') review.inFlightSessions.add(sessionId)
     void deps.runReview(deps.hostCtx, {
       cwd: session !== null && session !== undefined && session.header && session.header.cwd
         ? session.header.cwd
@@ -575,8 +555,12 @@ async function handleRefineCommand (rawInput, invocation, deps) {
       focus: focus === '' ? undefined : focus,
       settings: deps.settings,
       logger: deps.logger,
+    }).then((result) => {
+      if (result && result.ok && result.summary) review.appendReviewNotice(session, result, deps.logger)
     }).catch((error) => deps.logger.warn?.(`[hermes-evolve] /refine failed: ${error && error.message ? error.message : error}`))
+      .finally(() => { review.inFlightSessions.delete(sessionId) })
   } catch (error) {
+    review.inFlightSessions.delete(sessionId)
     return { kind: 'success', text: `/refine failed to start: ${error && error.message ? error.message : error}` }
   }
   const tail = focus === '' ? '' : ` (focus: ${focus})`

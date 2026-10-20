@@ -658,9 +658,9 @@ async function pinMatchedEntries (target, operations) {
 
 /** Stage one memory write for approval, with Hermes' summary + pinned entries. */
 async function stageMemoryOperations ({ target, limit, operations, approval }) {
-  // hermes pins entries only on the approval path (`_pin_matched_entries` runs
-  // inside `_gate_or_stage`); an unattended review stages the raw payload.
-  const pinned = approval === true ? await pinMatchedEntries(target, operations) : { ok: true, operations }
+  // hermes pins on both staging paths: `_gate_or_stage` (approval mode) and the
+  // unattended-review consolidation stage each call `_pin_matched_entries`.
+  const pinned = await pinMatchedEntries(target, operations)
   if (pinned.ok !== true) return { ok: false, error: pinned.detail }
   const row = await store.stagePending({
     kind: 'memory',
@@ -671,6 +671,31 @@ async function stageMemoryOperations ({ target, limit, operations, approval }) {
     actor: approval === true ? 'write-approval' : 'background-review',
   })
   return { ok: true, row }
+}
+
+/**
+ * Replay a staged memory write (hermes `apply_memory_pending`). A replace/remove
+ * applies to exactly its pinned entry or is refused; a record staged before
+ * pinning has no verifiable target, so it is refused rather than replayed by
+ * `oldText` (which could hit a newer entry the approver never saw). Shared by
+ * `/memory approve` and the panel so both gates behave the same.
+ */
+async function applyPendingMemory (row, { limit } = {}) {
+  const target = row.target === 'user' ? 'user' : 'memory'
+  const operations = Array.isArray(row.operations) ? row.operations : []
+  const destructive = operations.filter((op) => BG_DELETE_ACTIONS.has(op.action))
+  if (destructive.some((op) => typeof op.matched_entry !== 'string' || op.matched_entry === '')) {
+    return { ok: false, detail: 'This destructive pending write predates entry pinning and cannot be verified; nothing was applied. Reject it and recreate the change.' }
+  }
+  if (destructive.length > 0) {
+    const loaded = await memory.readStore(memoryDir(), target)
+    if (loaded.readFailed) return { ok: false, detail: 'The memory file could not be read. Refusing to overwrite it.' }
+    const entries = Array.isArray(loaded.entries) ? loaded.entries : []
+    if (destructive.some((op) => !entries.includes(op.matched_entry))) {
+      return { ok: false, detail: 'The entry this change targets no longer exists — it was edited or removed after the write was staged. Reject this write and stage a new one.' }
+    }
+  }
+  return memory.writeMemory(memoryDir(), target, operations, { limit })
 }
 
 /** hermes `stage_write` response for an unattended destructive memory edit. */
@@ -852,6 +877,7 @@ module.exports = {
   buildToolSet,
   toolContext,
   applyStagedSkillOperations,
+  applyPendingMemory,
   skillGist,
   json,
 }
