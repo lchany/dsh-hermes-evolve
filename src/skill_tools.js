@@ -596,23 +596,33 @@ async function opDelete (op, name, ctx, bag) {
 
 // ── memory ─────────────────────────────────────────────────────────────────
 
-const BG_DELETE_ACTIONS = new Set(['replace', 'remove'])
-const BG_DELETE_REFUSAL = "Background review may not delete memory entries ('replace'/'remove', including in a batch); 'add' is still available."
+// 'replace' is no longer offered to the model (memory.js REPLACE_REMOVED); it stays
+// in this set so writes staged before its removal still pin, display and replay.
+const BG_DELETE_ACTIONS = new Set(['replace', 'remove', 'patch'])
+const BG_DELETE_REFUSAL = "Background review may not delete memory entries ('patch'/'remove', including in a batch); 'add' is still available."
+
+/** hermes `_batch_op_line`: one line per op in a staged batch summary. */
+function batchOpLines (operations) {
+  return operations.map((op) => {
+    if (op.action === 'remove') return `- remove: ${op.oldText || ''}`
+    if (op.action === 'patch') return `- patch span '${op.oldText || ''}' -> '${op.text || ''}' (rest of the entry is kept)`
+    return `- ${op.action}: ${op.text || ''}`
+  })
+}
 
 /** Hermes' `_STORE_ACTIONS[...][1]` gate text + `stage_write`'s summary suffix. */
 function memorySummaryText (target, operations) {
   const label = target === 'user' ? 'user profile' : 'memory'
   const clip = (text) => String(text || '').slice(0, 120)
   if (operations.length > 1) {
-    const lines = operations.map((op) => {
-      if (op.action === 'remove') return `- remove: ${op.oldText || ''}`
-      return `- ${op.action}: ${op.text || ''}`
-    })
-    return `apply ${operations.length} op(s) to ${label}: ${clip(lines.join('\n'))}`
+    return `apply ${operations.length} op(s) to ${label}: ${clip(batchOpLines(operations).join('\n'))}`
   }
   const op = operations[0]
   if (op.action === 'replace') {
     return `replace in ${label}: ${clip(`entry matching: ${op.oldText || ''}\nwhole entry becomes: ${op.text || ''}`)}`
+  }
+  if (op.action === 'patch') {
+    return `patch in ${label}: ${clip(`entry matching: ${op.oldText || ''}\nspan '${op.oldText || ''}' becomes: ${op.text || ''} (rest of the entry is kept)`)}`
   }
   if (op.action === 'remove') return `remove from ${label}: ${clip(op.oldText || '')}`
   return `add to ${label}: ${clip(op.text || '')}`
@@ -662,12 +672,17 @@ async function stageMemoryOperations ({ target, limit, operations, approval }) {
   // unattended-review consolidation stage each call `_pin_matched_entries`.
   const pinned = await pinMatchedEntries(target, operations)
   if (pinned.ok !== true) return { ok: false, error: pinned.detail }
+  // The unattended path has its own summary shape (memory_tool.py
+  // `_background_delete_gate`): the origin is named, then the op lines.
+  const summary = approval === true
+    ? memorySummaryText(target, operations)
+    : `background review consolidation (${operations.length > 1 ? 'batch' : String(operations[0].action)} on ${target}): ${batchOpLines(operations).join('; ')}`.slice(0, 200)
   const row = await store.stagePending({
     kind: 'memory',
     target,
     limit,
     operations: pinned.operations,
-    summary: memorySummaryText(target, operations),
+    summary,
     actor: approval === true ? 'write-approval' : 'background-review',
   })
   return { ok: true, row }
@@ -699,14 +714,16 @@ async function applyPendingMemory (row, { limit } = {}) {
 }
 
 /** hermes `stage_write` response for an unattended destructive memory edit. */
-function stagedMemoryEnvelope (row) {
+function stagedMemoryEnvelope (row, action) {
   return json({
     success: true,
     done: true,
     staged: true,
     proposal_staged: true,
     pending_id: row.id,
-    message: 'Background review may not delete memory entries unattended. The proposed change was staged for your approval — open the hermes-evolve panel to approve (apply) or reject (drop) it.',
+    message: 'Background review may not delete memory entries unattended. The proposed ' +
+      `${action} was staged for your approval — review it with /memory pending ` +
+      '(approve to apply, discard to drop).',
   })
 }
 
@@ -733,6 +750,9 @@ async function handleMemory (args, ctx) {
         text: typeof op.content === 'string' ? op.content : (typeof op.new_text === 'string' ? op.new_text : ''),
         oldText: typeof op.old_text === 'string' ? op.old_text : '',
       }))
+      // `replace` was removed from the action model; a batch that still names it is
+      // refused with the same text as the single-op shape (memory_tool.py `_batch_ops`).
+      if (normalized.some((op) => op.action === 'replace')) return fail(memory.REPLACE_REMOVED)
       // Approval mode stages EVERY batch, as `evaluate_gate` does for a gated
       // subsystem; an unattended review stages only the destructive ones.
       if (approval || (ctx.unattendedMemory === true && normalized.some((op) => BG_DELETE_ACTIONS.has(op.action)))) {
@@ -745,21 +765,38 @@ async function handleMemory (args, ctx) {
         if (staged.ok !== true) return fail(approval ? staged.error : BG_DELETE_REFUSAL)
         const row = staged.row
         if (!row || row.id === undefined) return fail(approval ? 'Could not stage the change for approval.' : BG_DELETE_REFUSAL)
-        return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row)
+        return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row, 'batch')
       }
-      const outcome = await memory.writeMemory(memoryDir(), target, normalized, { limit })
+      const outcome = await memory.writeMemory(memoryDir(), target, normalized, { limit, batch: true })
       if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
       return json(outcome.ok ? successEnvelope('batch') : failureEnvelope(outcome, target))
     }
     if (args && typeof args.action !== 'string') {
-      return fail("Missing required parameter: provide 'action' (add/replace/remove) or 'operations' (batch list). Got neither.")
+      return fail("Missing required parameter: provide 'action' (add/patch/remove) or 'operations' (batch list). Got neither.")
     }
     const action = String(args.action)
-    if (!['add', 'replace', 'remove'].includes(action)) {
-      return fail(`Unknown action '${action}'. Use: add, replace, remove`)
+    // hermes memory_tool.py: replace is refused with a redirect, not an unknown action.
+    if (action === 'replace') return fail(memory.REPLACE_REMOVED)
+    if (!['add', 'patch', 'remove'].includes(action)) {
+      return fail(`Unknown action '${action}'. Use: add, patch, remove`)
+    }
+    if (action === 'add' && content === '') {
+      return fail("Content is required for 'add' action.")
     }
     if (action !== 'add' && oldText.trim() === '') {
-      return fail(`old_text is required for '${action}': a short unique substring identifying the existing entry.`)
+      const loaded = await memory.readStore(memoryDir(), target)
+      const payload = {
+        success: false,
+        error: `'${action}' needs old_text -- a short unique substring of the entry to ${action}. ` +
+          `None was provided. Reissue the ${action} with old_text set to part of one of the ` +
+          'current_entries below.',
+      }
+      if (Array.isArray(loaded.entries)) payload.current_entries = loaded.entries
+      payload.usage = `${memory.charsOf(loaded.entries || [])}/${limit}`
+      return json(payload)
+    }
+    if (action === 'patch' && content === '') {
+      return fail(`content (the new text for the old_text span) is required for 'patch' action. ${memory.PATCH_DROP_HINT}`)
     }
     if (approval || (ctx.unattendedMemory === true && BG_DELETE_ACTIONS.has(action))) {
       let staged
@@ -771,9 +808,9 @@ async function handleMemory (args, ctx) {
       if (staged.ok !== true) return fail(approval ? staged.error : BG_DELETE_REFUSAL)
       const row = staged.row
       if (!row || row.id === undefined) return fail(approval ? 'Could not stage the change for approval.' : BG_DELETE_REFUSAL)
-      return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row)
+      return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row, action)
     }
-    const outcome = await memory.writeMemory(memoryDir(), target, [{ action, text: content, oldText }], { limit })
+    const outcome = await memory.writeMemory(memoryDir(), target, [{ action, text: content, oldText }], { limit, batch: false })
     if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
     return json(outcome.ok ? successEnvelope(action) : failureEnvelope(outcome, target))
   } catch (error) {
@@ -790,12 +827,20 @@ function notifyMemoryWrite (ctx, target, outcome) {
   const rows = []
   for (const operation of Array.isArray(outcome.applied) ? outcome.applied : []) {
     if (operation.noop === true) continue
-    const action = typeof operation.action === 'string' ? operation.action : ''
+    let action = typeof operation.action === 'string' ? operation.action : ''
+    let content = typeof operation.text === 'string' ? operation.text : ''
+    if (action === 'patch') {
+      // The provider protocol has no patch; Hermes mirrors the patched ENTRY text
+      // through on_memory_write(action='replace', content=<patched entry>).
+      if (typeof operation.patched !== 'string') continue
+      action = 'replace'
+      content = operation.patched
+    }
     if (!['add', 'replace', 'remove'].includes(action)) continue
     rows.push({
       action,
       target,
-      content: typeof operation.text === 'string' ? operation.text : '',
+      content,
       previous_content: typeof operation.previous === 'string' ? operation.previous : '',
     })
   }

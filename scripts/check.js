@@ -105,6 +105,31 @@ const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
 if (!changelog.includes(`## [${pkg.version}]`)) fail(`CHANGELOG.md has no section for ${pkg.version}`)
 ok('packaged files exist and the changelog matches the version')
 
+// ── differential audit against a live Hermes checkout ──────────────────────
+//
+// The two extractors above prove this repo's artifacts are internally
+// consistent; only re-running them against a real checkout proves they still
+// match upstream. That needs python >= 3.11 with ruamel.yaml, which CI and many
+// dev boxes lack, so it degrades to a skip instead of a failure.
+const { spawnSync } = require('node:child_process')
+const os = require('node:os')
+const hermesSrc = process.env.HERMES_SRC || join(os.homedir(), '.hermes', 'hermes-agent')
+if (!existsSync(join(hermesSrc, 'agent', 'background_review.py'))) {
+  console.log(`(skip) differential audit: no Hermes checkout at ${hermesSrc} (set HERMES_SRC)`)
+} else {
+  const candidates = [process.env.HERMES_AUDIT_PYTHON, 'python3', 'python3.11', 'python3.12'].filter(Boolean)
+  const python = candidates.find((candidate) => spawnSync(candidate, ['-c', 'import ruamel.yaml'], { stdio: 'ignore' }).status === 0)
+  if (python === undefined) {
+    console.log('(skip) differential audit: no interpreter with ruamel.yaml (set HERMES_AUDIT_PYTHON)')
+  } else {
+    const audit = spawnSync(python, [join(ROOT, 'scripts', 'audit_hermes.py'),
+      '--hermes', hermesSrc, '--python', python], { encoding: 'utf8' })
+    if (audit.status === 0) ok(`differential audit against ${hermesSrc} (verbatim, linter, memory-format)`)
+    else if (audit.status === 2) console.log('(skip) differential audit: the script declined this checkout')
+    else fail(`differential audit failed (${audit.status}):\n${audit.stdout || ''}${audit.stderr || ''}`)
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
   process.exit(1)

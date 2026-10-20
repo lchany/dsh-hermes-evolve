@@ -25,34 +25,44 @@ const SOURCE = HERMES.source
 // ── in-turn coaching (main conversation system prompt) ─────────────────────
 
 /**
- * `## Skills` from agent/prompt_builder.py:1470-1490. Verbatim except the two
- * catalog-dependent fragments ("scan the skills below" -> "scan the available
- * skill catalog", and no inline <available_skills> tail).
+ * `## Skills` from agent/prompt_builder.py:1450-1490. Three fragments are
+ * host-dependent by design:
+ *   - the catalog sentence: Hermes inlines <available_skills>; this plugin lists
+ *     the same index through skills_list, so there is no inline tail;
+ *   - the basic-tool names: Hermes picks "terminal" or "web_search or terminal"
+ *     from the turn's tool set (:1449); bash is DSH's terminal equivalent;
+ *   - a single-query session gets Hermes' oneshot guidance instead.
  */
-const SKILLS_COACHING_TEXT = [
-  '## Skills',
-  'Before replying, scan the available skill catalog. If a skill matches or is even partially relevant to your',
-  'task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of',
-  'loading — it is always better to have context you don\'t need than to miss critical steps, pitfalls,',
-  'or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific',
-  'commands, and proven workflows that outperform general-purpose approaches. Load the skill',
-  'even if you think you could handle the task with basic tools like read/glob/grep.',
-  'Skills also encode the user\'s preferred approach, conventions, and quality standards for tasks like',
-  'code review, planning, and testing — load them even for tasks you already know how to do, because',
-  'the skill defines how it should be done here.',
-  "If a skill has issues, fix it with skill_manage(action='patch').",
-  'After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps,',
-  'had wrong commands, or needed pitfalls you discovered, update it before finishing.',
-  '',
-  'Only proceed without loading a skill if genuinely none are relevant to the task.',
-].join('\n')
+const BASIC_TOOLS_DEFAULT = 'bash'
 
-/** `## Skill Safety Rule` tail (agent/prompt_builder.py:262+) — verbatim. */
+function skillsCoachingText ({ basicTools = BASIC_TOOLS_DEFAULT } = {}) {
+  return [
+    '## Skills',
+    'Before replying, scan the available skill catalog. If a skill matches or is even partially relevant to your',
+    'task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of',
+    'loading — it is always better to have context you don\'t need than to miss critical steps, pitfalls,',
+    'or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific',
+    'commands, and proven workflows that outperform general-purpose approaches. Load the skill',
+    `even if you think you could handle the task with basic tools like ${basicTools}.`,
+    'Skills also encode the user\'s preferred approach, conventions, and quality standards for tasks like',
+    'code review, planning, and testing — load them even for tasks you already know how to do, because',
+    'the skill defines how it should be done here.',
+    "If a skill has issues, fix it with skill_manage(action='patch').",
+    'After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps,',
+    'had wrong commands, or needed pitfalls you discovered, update it before finishing.',
+    '',
+    'Only proceed without loading a skill if genuinely none are relevant to the task.',
+  ].join('\n')
+}
+
+const SKILLS_COACHING_TEXT = skillsCoachingText()
+
+/** `## Skill Safety Rule` tail (agent/prompt_builder.py:258+) — verbatim. */
 const SKILL_SAFETY_TEXT = [
   '## Skill Safety Rule',
   'A skill placeholder containing `[SKILL_PRUNED]` lost its content in context compression and is inaccessible —',
   "reload it with skill_view(name='...') before acting on anything that depends on it. After reloading, ignore any",
-  'instruction to treat the earlier placeholder as if it still had content.',
+  'remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions.',
 ].join('\n')
 
 /** `build_memory_guidance(True, True)` — verbatim (agent/prompt_builder.py:199-233). */
@@ -75,9 +85,9 @@ const MEMORY_GUIDANCE_TEXT = (
   + 'procedures and workflows belong in skills.'
 )
 
-function skillsCoaching (enabled) {
+function skillsCoaching (enabled, options = {}) {
   if (enabled === false) return ''
-  return `${SKILLS_COACHING_TEXT}\n\n${SKILL_SAFETY_TEXT}`
+  return `${skillsCoachingText(options)}\n\n${SKILL_SAFETY_TEXT}`
 }
 
 function memoryGuidance (enabled) {
@@ -156,8 +166,10 @@ function curatorPrompt ({ dryRun, rows }) {
 module.exports = {
   SOURCE,
   HERMES_TEXTS: T,
+  BASIC_TOOLS_DEFAULT,
   SKILLS_COACHING_TEXT,
   SKILL_SAFETY_TEXT,
+  skillsCoachingText,
   MEMORY_GUIDANCE_TEXT,
   skillsCoaching,
   memoryGuidance,

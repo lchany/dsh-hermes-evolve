@@ -27,6 +27,31 @@ async function mkSkill (home, name, description = 'Test skill.') {
   await writeFile(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n## Procedure\n\n1. Do the thing.\n`, 'utf8')
 }
 
+test('a dry run counts candidates but mutates nothing', async () => {
+  await withHome(async (home) => {
+    await mkSkill(home, 'old-skill')
+    await mkSkill(home, 'fresh-skill')
+    await usage.seedRecordIfMissing('old-skill')
+    // Pretend the skill was last used 40 days ago: a real pass would archive it.
+    const records = await usage.loadUsage()
+    records['old-skill'].last_used_at = iso(40)
+    records['old-skill'].state = 'stale'
+    await usage.saveUsage(records)
+    const before = await readFile(join(home, 'skills', '.usage.json'), 'utf8')
+
+    const result = await curator.runCurator({ hostCtx: {}, settings: { ...SETTINGS, curatorConsolidate: false }, logger: null, dryRun: true, force: true })
+    assert.equal(result.ok, true)
+    assert.equal(result.dryRun, true)
+    assert.deepEqual(result.automatic.archived, [])
+    assert.equal(result.automatic.checked, 2)
+    assert.match(result.state.last_run_summary, /^dry-run auto: no changes/)
+    const after = await readFile(join(home, 'skills', '.usage.json'), 'utf8')
+    assert.equal(after, before, 'a dry run must not touch usage records')
+    await assert.rejects(access(join(home, 'skills', '.archive', 'old-skill')), 'nothing archived')
+    assert.ok(result.reportPath, 'the preview still writes REPORT.md')
+  })
+})
+
 test('refuses an archive window shorter than the stale window', async () => {
   await withHome(async () => {
     const result = await curator.deterministicPass({ settings: { curatorStaleDays: 30, curatorArchiveDays: 14 } })

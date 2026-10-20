@@ -62,6 +62,50 @@ test('a review fires only after the iteration threshold and a completed turn', a
   assert.equal(fired, 1)
 })
 
+test('a review fork budget denies tool calls past its limit', async () => {
+  const id = 'hermes-evolve-review-budget'
+  review.__reviewBudgets.set(id, { used: 0, max: 2 })
+  try {
+    assert.equal(review.consumeReviewIteration(id).allowed, true)
+    assert.equal(review.consumeReviewIteration(id).allowed, true)
+    const over = review.consumeReviewIteration(id)
+    assert.equal(over.allowed, false)
+    assert.equal(over.used, 3)
+    assert.match(review.reviewBudgetReason(over.used, over.max), /2-step tool budget \(3 used\)/)
+    assert.equal(review.consumeReviewIteration('not-a-review-session'), null)
+  } finally {
+    review.__reviewBudgets.delete(id)
+  }
+})
+
+test('a second review inside 30 minutes is throttled and keeps its trigger', async () => {
+  let fired = 0
+  let clock = 10_000_000
+  const { session } = fakeSession()
+  const scheduler = review.createScheduler({
+    hostCtx: null,
+    settings: { ...SETTINGS, skillNudgeInterval: 1, memoryNudgeInterval: 1000 },
+    logger: { info: () => {}, debug: () => {} },
+    now: () => clock,
+    runReview: async () => { fired += 1; return { ok: false, skipped: 'test' } },
+  })
+
+  const turn = async () => {
+    await scheduler.onEvent(session, event('step/end', {}))
+    await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }))
+    await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
+  }
+
+  await turn()
+  assert.equal(fired, 1)
+  clock += 60_000
+  await turn()
+  assert.equal(fired, 1, 'throttled inside the 30 minute window')
+  clock += 30 * 60_000
+  await turn()
+  assert.equal(fired, 2, 'the kept trigger fires once the window passes')
+})
+
 test('an interrupted or empty turn never triggers a review', async () => {
   const logs = []
   const { session } = fakeSession()

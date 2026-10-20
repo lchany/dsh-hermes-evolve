@@ -6,7 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Hermes' Desktop control points, ported as DSH commands.
+Hermes' Desktop control points, ported as DSH commands; memory moved to the
+current upstream action model; review cost is bounded.
+
+### Added
+
+- `memory` now speaks Hermes' current action model: `add` / `patch` / `remove`,
+  where `patch` replaces exactly one `old_text` span and keeps the rest of the
+  entry. `replace` is refused with Hermes' own sentence and survives only to
+  replay writes staged by older versions. Schemas were re-extracted from a live
+  `v0.22.2` checkout (`extract_schemas.py`), which is also what the differential
+  audit re-checks.
+- Review forks are bounded like upstream: `reviewMaxIterations` (16) denies tool
+  calls once a fork's budget is spent, so it answers with what it has; a second
+  automatic review of the same session inside 30 minutes is skipped and its
+  trigger is kept for the next completed turn.
+- `curator run --dry-run` is now read-only: it counts candidates, records
+  `dry-run auto: no changes` and still writes `REPORT.md`, but never seeds,
+  transitions or archives.
+
+### Fixed
+
+- The `## Skills` coaching section restores Hermes' verbatim `[SKILL_PRUNED]`
+  safety tail and names the basic tools the way upstream does (`bash`, or
+  `web_search or bash` when a web-search tool is registered) instead of a
+  hand-written list.
+- `scripts/check.js` now runs the differential audit against a live Hermes
+  checkout when one and a `ruamel.yaml`-capable interpreter are available.
 
 ### Added
 

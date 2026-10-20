@@ -54,6 +54,8 @@ const REVIEW_TOOL_ALLOW = Object.freeze(['skills_list', 'skill_view', 'skill_man
  * session-id test alone) because whether `memory` is in scope is decided per
  * review pass (`review_memory`), exactly like `_review_tool_whitelist`.
  */
+const REVIEW_MIN_SPACING_MS = 30 * 60 * 1000
+const reviewBudgets = new Map()
 const reviewSessions = new Map()
 
 /** The policy for a session id, or undefined when it is not a live review fork. */
@@ -139,6 +141,26 @@ function renderTranscript (messages, { maxChars = 12000, maxMessages = 40 } = {}
  *
  * @param {object} hostCtx  the plugin's context (has `.agents`, `.tools`, `.agentDefaultModel`)
  */
+/**
+ * hermes `_REVIEW_MAX_ITERATIONS`: a review fork may take at most N tool-iteration
+ * steps before the host stops it. DSH exposes no max-steps option, so the cap is
+ * enforced at dispatch: past the budget every tool call is denied with a reason
+ * telling the model to answer with what it has (Hermes aborts the run outright).
+ */
+function reviewBudget (sessionId) { return reviewBudgets.get(sessionId) }
+
+function consumeReviewIteration (sessionId) {
+  const budget = reviewBudgets.get(sessionId)
+  if (budget === undefined) return null
+  budget.used += 1
+  return { used: budget.used, max: budget.max, allowed: budget.used <= budget.max }
+}
+
+function reviewBudgetReason (used, max) {
+  return `Background review reached its ${max}-step tool budget (${used} used). `
+    + 'Stop calling tools and answer with what you already have.'
+}
+
 async function runReview (hostCtx, options) {
   const {
     cwd,
@@ -207,6 +229,10 @@ async function runReview (hostCtx, options) {
   // land as soon as the fork starts.
   const sessionId = `${REVIEW_SESSION_PREFIX}${randomUUID()}`
   reviewSessions.set(sessionId, { memory: memoryAllowed })
+  reviewBudgets.set(sessionId, {
+    used: 0,
+    max: settings.reviewMaxIterations > 0 ? settings.reviewMaxIterations : 16,
+  })
 
   let handle
   const timer = setTimeout(() => {
@@ -255,6 +281,7 @@ async function runReview (hostCtx, options) {
   } finally {
     clearTimeout(timer)
     reviewSessions.delete(sessionId)
+    reviewBudgets.delete(sessionId)
     if (handle !== undefined) {
       try { await handle.dispose() } catch { /* already gone */ }
     }
@@ -327,7 +354,7 @@ const inFlightSessions = new Set()
  * Per-session counters. hermes keeps these on the AIAgent instance; a host-plane
  * plugin sees every session's events, so the map is keyed by session id.
  */
-function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl }) {
+function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, now = Date.now }) {
   const doReview = typeof reviewImpl === 'function' ? reviewImpl : runReview
   const sessions = new Map()
   const inFlight = inFlightSessions
@@ -345,6 +372,7 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl }) 
         lastUserMessage: '',
         pendingSkill: false,
         pendingMemory: false,
+        lastReviewAt: 0,
       }
       sessions.set(sessionId, state)
     }
@@ -393,19 +421,28 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl }) 
           : 0
         const fireSkills = skillInterval > 0 && state.itersSinceSkill >= skillInterval
         const fireMemory = memoryInterval > 0 && state.turnsSinceMemory >= memoryInterval
-        if (fireSkills) state.itersSinceSkill = 0
-        if (fireMemory) state.turnsSinceMemory = 0
         const hadResponse = state.lastAssistantText.trim() !== ''
         const transcript = snapshotMessages(session)
         state.lastAssistantText = ''
         state.lastTurnInterrupted = false
         state.lastUserMessage = ''
         if (interrupted || !hadResponse || (!fireSkills && !fireMemory)) return
+        // hermes detaches a background review but refuses to start another one for
+        // the same conversation inside 1800s (agent/background_review.py:78-98).
+        // Counters are only consumed when a pass actually starts, so a throttled
+        // trigger retries on the next completed turn instead of being lost.
+        if (now() - state.lastReviewAt < REVIEW_MIN_SPACING_MS) {
+          logger?.debug?.('[hermes-evolve] review throttled (started <30m ago); keeping the trigger')
+          return
+        }
         const key = session.id
         if (inFlight.has(key)) {
           logger?.debug?.('[hermes-evolve] review already in flight for this session; skipping')
           return
         }
+        if (fireSkills) state.itersSinceSkill = 0
+        if (fireMemory) state.turnsSinceMemory = 0
+        state.lastReviewAt = now()
         inFlight.add(key)
         try {
           const result = await doReview(hostCtx, {
@@ -477,8 +514,13 @@ module.exports = {
   REVIEW_TOOL_ALLOW,
   reviewSessionPolicy,
   reviewToolAllowed,
+  REVIEW_MIN_SPACING_MS,
   reviewDenyReason,
+  reviewBudget,
+  consumeReviewIteration,
+  reviewBudgetReason,
   // Tests drive the in-flight registry directly; production only touches it
   // through runReview().
   __reviewSessions: reviewSessions,
+  __reviewBudgets: reviewBudgets,
 }

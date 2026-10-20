@@ -190,6 +190,20 @@ function apply (ctx, config = {}) {
   void refreshMemoryCache()
 
   // ── system prompt: durable instructions + the memory snapshot ───────────
+  //
+  // hermes prompt_builder.py:1449 names the basic tools from the turn's tool
+  // set: "terminal" alone, or "web_search or terminal" when web search is
+  // available. bash is DSH's terminal; the label is computed per call because
+  // plugins may register tools after this section is installed.
+  const basicToolsLabel = () => {
+    try {
+      const names = new Set(ctx.tools.schemas().map((schema) => schema.name))
+      return names.has('web_search') ? 'web_search or bash' : 'bash'
+    } catch {
+      return prompts.BASIC_TOOLS_DEFAULT
+    }
+  }
+
   ctx.effect(() => {
     const disposers = []
     disposers.push(ctx.systemPrompt.section({
@@ -204,7 +218,7 @@ function apply (ctx, config = {}) {
         if (settings.coachingEnabled === false) return ''
         // Pointing the model at a tool nobody registered is worse than silence.
         if (!hasSkillManage()) return ''
-        return prompts.skillsCoaching(settings.coachingMode !== 'patch-only')
+        return prompts.skillsCoaching(settings.coachingMode !== 'patch-only', { basicTools: basicToolsLabel() })
       },
     }))
     disposers.push(ctx.systemPrompt.context({
@@ -315,6 +329,12 @@ function apply (ctx, config = {}) {
           : undefined
         if (policy !== undefined && !review.reviewToolAllowed(exec.name, policy)) {
           return { kind: 'deny', reason: review.reviewDenyReason(exec.name, policy) }
+        }
+        if (policy !== undefined) {
+          const budget = review.consumeReviewIteration(session.id)
+          if (budget !== null && budget.allowed === false) {
+            return { kind: 'deny', reason: review.reviewBudgetReason(budget.used, budget.max) }
+          }
         }
       } catch { /* a broken listener must never block dispatch */ }
       return next()

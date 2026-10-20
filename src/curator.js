@@ -113,13 +113,31 @@ async function archiveSkillDir (skill) {
 
 // ── deterministic pass ─────────────────────────────────────────────────────
 
-async function deterministicPass ({ settings, nowMs = Date.now() }) {
+async function deterministicPass ({ settings, nowMs = Date.now(), dryRun = false }) {
   const staleDays = Math.max(1, Number(settings.curatorStaleDays) || 14)
   const archiveDays = Math.max(1, Number(settings.curatorArchiveDays) || 30)
   if (archiveDays < staleDays) {
     return { ok: false, error: `curatorArchiveDays (${archiveDays}) must be >= curatorStaleDays (${staleDays}); refusing to run a pass that archives what it just marked stale.` }
   }
   const skills = await store.scanSkills()
+  // hermes agent/curator.py:928 — a dry run counts candidates without mutating
+  // state: no seeding, no transitions, no archive moves (the earlier port ran the
+  // real pass and only labelled it "dry", which renamed directories).
+  if (dryRun === true) {
+    return {
+      ok: true,
+      dryRun: true,
+      checked: skills.length,
+      markedStale: 0,
+      reactivated: 0,
+      seeded: 0,
+      archived: [],
+      errors: [],
+      remaining: skills.length,
+      staleDays,
+      archiveDays,
+    }
+  }
   const usage = await usageMod.loadUsage()
   const records = new Map()
   for (const skill of skills) {
@@ -189,6 +207,24 @@ async function deterministicPass ({ settings, nowMs = Date.now() }) {
 
 async function consolidationPass ({ hostCtx, settings, logger, dryRun, model }) {
   const skills = await store.scanSkills()
+  // hermes agent/curator.py:928 — a dry run counts candidates without mutating
+  // state: no seeding, no transitions, no archive moves (the earlier port ran the
+  // real pass and only labelled it "dry", which renamed directories).
+  if (dryRun === true) {
+    return {
+      ok: true,
+      dryRun: true,
+      checked: skills.length,
+      markedStale: 0,
+      reactivated: 0,
+      seeded: 0,
+      archived: [],
+      errors: [],
+      remaining: skills.length,
+      staleDays,
+      archiveDays,
+    }
+  }
   const usage = await usageMod.loadUsage()
   // hermes `_render_candidate_list()`: only curator-managed skills are offered to
   // the LLM pass, with the same row shape the prompt renders.
@@ -385,7 +421,7 @@ async function runCurator ({ hostCtx, settings, logger, dryRun = false, consolid
       logger?.info?.(`[hermes-evolve] curator backup ${backup && backup.id ? backup.id : '(failed)'}`)
     }
 
-    const automatic = await deterministicPass({ settings, nowMs })
+    const automatic = await deterministicPass({ settings, nowMs, dryRun: dryRun === true })
     let consolidation = null
     if (consolidatePass) {
       const raw = await consolidationPass({ hostCtx, settings, logger, dryRun, model })
@@ -421,7 +457,21 @@ async function runCurator ({ hostCtx, settings, logger, dryRun = false, consolid
       await saveState(state)
       return { ok: true, state, automatic, consolidation, durationSeconds, reportPath }
     }
-    return { ok: true, dryRun: true, state, automatic, consolidation }
+    // Dry runs do not bump last_run_at/run_count (a preview must not push the
+    // next real pass out) but still record a summary and write REPORT.md, so
+    // `curator status` and the report show what WOULD have happened.
+    // hermes builds the line from the dry-run counts, which are zeros by design.
+    state.last_run_summary = 'dry-run auto: no changes'
+    if (consolidation !== null) {
+      state.last_run_summary = `${state.last_run_summary}; llm: ${consolidation.ok === true ? 'reported only (dry-run)' : `error: ${consolidation.error}`}`
+    }
+    let reportPath
+    try {
+      reportPath = await writeReport({ automatic, consolidation, state })
+      state.last_report_path = reportPath
+    } catch { /* a report is never worth failing the preview for */ }
+    await saveState(state)
+    return { ok: true, dryRun: true, state, automatic, consolidation, reportPath }
   } finally {
     await lock.release()
   }

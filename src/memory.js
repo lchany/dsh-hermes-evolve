@@ -165,19 +165,98 @@ function renderBlock (store, entries, limit, { blockedInSnapshot = true } = {}) 
 
 // ── write planning ─────────────────────────────────────────────────────────
 
-const OP_KINDS = ['add', 'replace', 'remove']
+const OP_KINDS = ['add', 'patch', 'remove']
+
+// Hermes memory_tool.py: the model-facing action model is add/patch/remove. `replace`
+// was removed when `patch` arrived; existing staged records that say replace still
+// replay (skill_tools), but a new call is refused with this text.
+const REPLACE_REMOVED = "'replace' is not available; use 'patch'. old_text is the exact span to change and content is its new text; the rest of the entry is kept. To rewrite a whole entry, set old_text to the whole entry. Nothing was written."
+const PATCH_DROP_HINT = "To drop text inside an entry, patch a longer span that contains it; 'remove' deletes the whole entry."
+
+/** Occurrences of a span, overlapping ones included: '00' occurs twice in '1000'. */
+function spanOccurrences (text, span) {
+  if (span === '') return 0
+  let count = 0
+  for (let i = 0; i + span.length <= text.length; i++) if (text.startsWith(span, i)) count++
+  return count
+}
+
+/** Hermes `_repeated_span_message`. */
+function repeatedSpanMessage (oldText, count) {
+  return `'${oldText}' appears ${count} times in the matched entry, and patch edits one span. ` +
+    'Include more surrounding text so old_text occurs once.'
+}
+
+/**
+ * Hermes `_patch_entry`: splice exactly one span and keep the rest of the entry
+ * verbatim. A span that occurs more than once is refused rather than edited
+ * everywhere; a no-op edit and a poisoned result are refused too.
+ */
+function patchEntry (entry, oldText, newText) {
+  const count = spanOccurrences(entry, oldText)
+  if (count > 1) return { ok: false, reason: 'ambiguous', detail: repeatedSpanMessage(oldText, count) }
+  const patched = entry.replace(oldText, newText)
+  if (patched === entry) {
+    return {
+      ok: false,
+      reason: 'invalid-args',
+      detail: `Patch is a no-op: '${oldText}' -> '${newText}' leaves the entry unchanged.`,
+    }
+  }
+  const scan = scanEntry(patched)
+  if (!scan.ok) return { ok: false, reason: 'threat', detail: `Entry rejected: ${scan.issues.join(', ')}.` }
+  return { ok: true, entry: patched }
+}
+
+/** Hermes `_no_match_error`: name the entries sharing the most words with old_text. */
+function noMatchMessage (entries, oldText, verb) {
+  const words = new Set(String(oldText || '').toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [])
+  const closeness = []
+  if (words.size > 0) {
+    entries.forEach((entry, index) => {
+      const candidate = new Set(String(entry).toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [])
+      let shared = 0
+      for (const word of words) if (candidate.has(word)) shared++
+      const score = shared / words.size
+      if (score >= 0.3) closeness.push({ score, index, entry })
+    })
+    closeness.sort((a, b) => b.score - a.score || a.index - b.index)
+  }
+  const closest = closeness.slice(0, 3).map((item) => item.entry)
+  const hint = String(oldText || '').includes('§')
+    ? " old_text must come from ONE entry ('§' separates entries); use one op per entry."
+    : ''
+  return {
+    detail: `No entry matched '${oldText}'.${hint} Retry the ${verb} with old_text copied verbatim ` +
+      `from the intended entry${closest.length > 0 ? ' (closest_entries below).' : '.'}`,
+    closestEntries: closest,
+  }
+}
 
 /**
  * Apply ONE op to an entry list, returning a plan (no I/O).
- * Mirrors Hermes: replace is whole-entry replacement, old_text only locates.
+ * Single-op shape uses the tool-level wording (memory_tool.py `_validate_single_op`);
+ * `position` switches to the batch wording ("Operation 2 (patch): …").
  */
-function applyOne (entries, op) {
-  const kind = op.action
-  if (!OP_KINDS.includes(kind)) return { ok: false, reason: 'bad-action', detail: `unknown action '${kind}'` }
+function applyOne (entries, op, { position = null } = {}) {
+  const kind = String(op.action || '')
+  const batch = position !== null
+  const pos = batch ? `${position}: ` : ''
+  // 'replace' is no longer offered to the model; a staged record created before
+  // its removal still replays here (memory_tool.py keeps it in _STORE_ACTIONS).
+  if (!OP_KINDS.includes(kind) && kind !== 'replace') {
+    return {
+      ok: false,
+      reason: 'bad-action',
+      detail: batch ? `${pos}unknown action. Use add, patch, or remove.` : `Unknown action '${kind}'. Use: add, patch, remove`,
+    }
+  }
 
   if (kind === 'add') {
     const text = normalizeEntry(op.text)
-    if (text === '') return { ok: false, reason: 'no-content', detail: "Content is required for 'add' action." }
+    if (text === '') {
+      return { ok: false, reason: 'no-content', detail: batch ? `${pos}content is required.` : "Content is required for 'add' action." }
+    }
     if (entries.some((e) => normalizeEntry(e) === text)) {
       // Exact duplicates are a no-op, not a failure (Hermes dedups on load too).
       return { ok: true, entries, noop: true, detail: 'Entry already exists (no duplicate added).' }
@@ -185,81 +264,155 @@ function applyOne (entries, op) {
     return { ok: true, entries: [...entries, text] }
   }
 
-  const found = findEntry(entries, op.oldText)
-  if (found.error === 'empty') {
-    return { ok: false, reason: 'missing-old-text', detail: `old_text is required for '${kind}' action.` }
+  const oldRaw = op.oldText === undefined || op.oldText === null ? '' : String(op.oldText)
+  if (oldRaw.trim() === '') {
+    return {
+      ok: false,
+      reason: 'missing-old-text',
+      detail: batch
+        ? `${pos}old_text is required.`
+        : `'${kind}' needs old_text -- a short unique substring of the entry to ${kind}. None was provided. ` +
+          `Reissue the ${kind} with old_text set to part of one of the current_entries below.`,
+    }
   }
-  if (found.error === 'no-match') return { ok: false, reason: 'no-match', detail: `No entry matching '${truncate(op.oldText, 80)}' was found.` }
-  if (found.error === 'ambiguous') return { ok: false, reason: 'ambiguous', detail: `'${truncate(op.oldText, 60)}' matches ${found.candidates.length} entries; quote more of the entry.`, candidates: found.candidates }
+  if (kind === 'patch') {
+    const newText = op.text
+    if (newText === undefined || newText === null || String(newText).trim() === '') {
+      return {
+        ok: false,
+        reason: 'no-content',
+        detail: batch
+          ? `${pos}content is required — set this operation object's own 'content' to the new text for the old_text span. ${PATCH_DROP_HINT}`
+          : `content (the new text for the old_text span) is required for 'patch' action. ${PATCH_DROP_HINT}`,
+      }
+    }
+  }
+
+  if (kind === 'replace') {
+    // Legacy replay: apply to the pinned entry when one was stored, exactly like
+    // memory_tool.py `store.replace(target, old_text, content, entry=matched_entry)`.
+    if (String(op.text || '').trim() === '') {
+      return { ok: false, reason: 'no-content', detail: batch ? `${pos}content is required.` : "Content is required for 'replace' action." }
+    }
+    let index = typeof op.matched_entry === 'string' ? entries.indexOf(op.matched_entry) : -1
+    if (index < 0) {
+      const located = findEntry(entries, oldRaw)
+      if (located.error === 'no-match') {
+        const miss = noMatchMessage(entries, oldRaw, 'replace')
+        return { ok: false, reason: 'no-match', detail: batch ? `${pos}${miss.detail}` : miss.detail, closestEntries: miss.closestEntries }
+      }
+      if (located.error === 'ambiguous') {
+        return {
+          ok: false,
+          reason: 'ambiguous',
+          detail: batch ? `${pos}'${oldRaw}' matched multiple distinct entries -- be more specific.` : `Multiple entries matched '${oldRaw}'. Be more specific.`,
+          candidates: located.candidates,
+        }
+      }
+      index = located.index
+    }
+    const next = entries.slice()
+    const previous = next[index]
+    next[index] = normalizeEntry(op.text)
+    return { ok: true, entries: next, previous }
+  }
+
+  const found = findEntry(entries, oldRaw)
+  if (found.error === 'no-match') {
+    const miss = noMatchMessage(entries, oldRaw, kind)
+    return { ok: false, reason: 'no-match', detail: batch ? `${pos}${miss.detail}` : miss.detail, closestEntries: miss.closestEntries }
+  }
+  if (found.error === 'ambiguous') {
+    const matches = found.candidates.map((entry) => (entry.length > 80 ? `${entry.slice(0, 80)}...` : entry))
+    return {
+      ok: false,
+      reason: 'ambiguous',
+      detail: batch
+        ? `${pos}'${oldRaw}' matched multiple distinct entries -- be more specific.`
+        : `Multiple entries matched '${oldRaw}'. Be more specific.`,
+      candidates: batch ? matches : found.candidates,
+      matches,
+    }
+  }
 
   if (kind === 'remove') {
     const next = entries.filter((_, i) => i !== found.index)
     return { ok: true, entries: next, removed: entries[found.index] }
   }
 
-  const text = normalizeEntry(op.text)
-  if (text === '') return { ok: false, reason: 'no-content', detail: "Content is required for 'replace' action." }
+  // patch: the span keeps its whitespace — it is part of the text being replaced.
+  const result = patchEntry(entries[found.index], oldRaw, String(op.text))
+  if (result.ok !== true) return { ...result, detail: batch ? `${pos}${result.detail}` : result.detail }
   const next = entries.slice()
   const previous = next[found.index]
-  next[found.index] = text
-  return { ok: true, entries: next, previous }
+  next[found.index] = result.entry
+  return { ok: true, entries: next, previous, patched: result.entry }
 }
 
 /**
  * Apply a batch. The limit is checked on the FINAL state only — that is what
  * makes "free 153 chars by shortening one entry, then add" possible in one call.
+ * `batch` distinguishes `operations` (atomic, pos-labelled, cannot empty the store)
+ * from the bare single-op shape (one store call, allowed to delete the last entry).
  */
-function applyOperations (entries, operations, { limit }) {
+function applyOperations (entries, operations, { limit, batch = operations.length > 1, label = 'the store' } = {}) {
   let current = entries.slice()
   const applied = []
-  for (const op of operations) {
-    const result = applyOne(current, op)
-    if (!result.ok) {
-      return { ok: false, ...result, current, applied, currentEntries: current }
-    }
+  const suffix = batch ? ' No operations were applied (batch is all-or-nothing).' : ''
+  const fail = (detail, extra) => ({ ok: false, ...extra, detail: `${detail}${suffix}`, current, applied, currentEntries: current })
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i]
+    const position = batch ? `Operation ${i + 1} (${String(op.action || 'unknown') || 'unknown'})` : null
+    const result = applyOne(current, op, { position })
+    if (!result.ok) return fail(result.detail, result)
     current = result.entries
-    applied.push({ ...op, noop: result.noop === true, previous: result.previous, removed: result.removed })
+    applied.push({
+      ...op,
+      noop: result.noop === true,
+      previous: result.previous,
+      removed: result.removed,
+      patched: result.patched,
+    })
   }
 
-  // Refuse to empty a previously non-empty store: a batch that removes every
-  // entry is far more likely to be a matching accident than an intent.
-  if (entries.length > 0 && current.length === 0) {
-    return {
-      ok: false,
-      reason: 'would-empty',
-      detail: 'Refusing to empty the store: this batch would remove every entry from a previously non-empty store. Delete the final entry deliberately with a single remove operation.',
-      currentEntries: current,
-      applied,
-    }
+  // A batch that removes every entry is far more likely to be a matching accident
+  // than an intent; hermes' single remove() is the deliberate-wipe path (#103419).
+  if (batch && entries.length > 0 && current.length === 0) {
+    return fail(`Refusing to empty ${label}: this batch would remove every entry from a previously non-empty store. ` +
+      'Keep at least one entry — merge overlapping entries into a shorter one instead of removing the last one. ' +
+      'To delete the final entry deliberately, use single remove() calls.', { reason: 'would-empty' })
   }
 
   const used = charsOf(current)
   if (used > limit) {
     const deficit = used - limit
-    // Hermes' wording: the model must fix this in ONE corrective batch, because
-    // the limit is checked on the batch result and a second round trip is worse
-    // than the extra sentence.
     const usedText = used.toLocaleString('en-US')
     const limitText = limit.toLocaleString('en-US')
     const deficitText = deficit.toLocaleString('en-US')
-    return {
-      ok: false,
-      reason: 'over-limit',
-      detail: `Memory at ${usedText}/${limitText} chars; this batch would exceed the limit by ${deficitText} chars. ` +
-        'Retry as ONE \'operations\' batch that removes or shortens (replace) stale entries from current_entries ' +
-        `below to free at least ${deficitText} chars AND adds this entry — the limit is checked only on the batch result.`,
-      deficit,
-      used,
-      limit,
-      currentEntries: current,
-      applied,
+    const singleKind = batch ? null : String((operations[0] || {}).action || '')
+    let detail
+    if (batch) {
+      detail = `Applying all ${operations.length} operations would put memory at ${usedText}/${limitText} chars: ` +
+        `free at least ${deficitText} chars more. Add removes or shortening patches of other stale entries to the same batch, then retry.`
+    } else if (singleKind === 'add') {
+      const added = String((applied[0] && applied[0].text) || '').trim().length
+      detail = `Memory at ${usedText}/${limitText} chars; adding this entry (${added.toLocaleString('en-US')} chars) ` +
+        `would exceed the limit by ${deficitText} chars. Retry as ONE 'operations' batch that removes or shortens (patch) ` +
+        'stale entries from current_entries below to free at least ' +
+        `${deficitText} chars AND adds this entry — the limit is checked only on the batch result.`
+    } else {
+      // patch: the replacement already landed in `current`; hermes words this per-shape.
+      detail = `Patch would put memory at ${usedText}/${limitText} chars. Shorten the new text, or 'remove' other ` +
+        'stale or less important entries to make room (see current_entries below), then retry — all in this turn.'
     }
+    return fail(detail, { reason: 'over-limit', deficit, used, limit })
   }
 
   for (const entry of current) {
     const scan = scanEntry(entry)
     if (!scan.ok) {
-      return { ok: false, reason: 'threat', detail: `Entry rejected: ${scan.issues.join(', ')}.`, currentEntries: current, applied }
+      return fail(`Entry rejected: ${scan.issues.join(', ')}.`, { reason: 'threat' })
     }
   }
 
@@ -297,12 +450,16 @@ function renderMemoryContext (stores, { lang = 'zh' } = {}) {
  * Write a memory change to disk. `dir` selects the global or workspace layer.
  * Returns a structured outcome — callers never throw on a rejected write.
  */
-async function writeMemory (dir, store, operations, { limit, header } = {}) {
+async function writeMemory (dir, store, operations, { limit, header, batch = operations.length > 1 } = {}) {
   const { entries, readFailed } = await readStore(dir, store)
   if (readFailed) {
     return { ok: false, reason: 'read-failed', detail: 'The memory file could not be read. Refusing to overwrite it.' }
   }
-  const plan = applyOperations(entries, operations, { limit })
+  const plan = applyOperations(entries, operations, {
+    limit,
+    batch,
+    label: store === 'user' ? 'USER.md' : 'MEMORY.md',
+  })
   if (!plan.ok) return { ...plan, ok: false }
   await atomicWrite(storeFile(dir, store), serializeEntries(plan.entries))
   if (header !== undefined) {
@@ -322,6 +479,8 @@ module.exports = {
   STORES,
   STORE_KIND,
   HEADERS,
+  REPLACE_REMOVED,
+  PATCH_DROP_HINT,
   storeFile,
   parseEntries,
   serializeEntries,

@@ -31,6 +31,13 @@ const DEFAULTS = {
   skillNudgeInterval: 10,
   memoryNudgeInterval: 10,
   maxTranscriptChars: 12000,
+  // hermes agent/background_review.py:_REVIEW_MAX_ITERATIONS — the review fork
+  // gets at most this many tool-iteration steps; past it Hermes aborts the run.
+  reviewMaxIterations: 16,
+  // hermes caps review input at min(600k, 75% of the window) with a 120k floor.
+  // DSH has no per-request token seam, so the transcript ceiling is expressed in
+  // characters at a conservative 4 chars/token.
+  reviewMaxInputChars: 120000 * 4,
   maxTranscriptMessages: 40,
   reviewTimeoutSec: 300,
 
@@ -110,7 +117,8 @@ function settingsSchema (S) {
 
     skillNudgeInterval: S.number().min(1).default(10).volatile(),
     memoryNudgeInterval: S.number().min(1).default(10).volatile(),
-    maxTranscriptChars: S.number().min(1000).default(12000).volatile(),
+    maxTranscriptChars: S.number().min(1000).max(480000).default(12000).volatile(),
+    reviewMaxIterations: S.number().min(1).max(64).default(16).volatile(),
     maxTranscriptMessages: S.number().min(5).max(400).default(40).volatile(),
     reviewTimeoutSec: S.number().min(30).default(300).volatile(),
 

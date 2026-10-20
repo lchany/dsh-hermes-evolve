@@ -15,7 +15,7 @@ Hermes Agent's **self-evolution loop**, ported to [DeepSeek Harness](https://git
 | Capability | Behaviour | Ported from |
 | --- | --- | --- |
 | **Memory + user profile** | `$DSH_HOME/memories/MEMORY.md` (environment facts) and `USER.md` (who the user is), `§`-delimited entries, 2,200 / 1,375 char budgets, injected into every new session as a frozen snapshot | `tools/memory_tool.py`, `tools/memory_tool_store.py` |
-| **`memory` tool** | batch `operations` (add / replace / remove), exact Hermes error strings, injection-side threat screening | `tools/memory_tool.py` |
+| **`memory` tool** | batch `operations` (add / patch / remove; `replace` survives only as a legacy replay), exact Hermes error strings, injection-side threat screening | `tools/memory_tool.py` |
 | **Skill library** | `$DSH_HOME/skills/<name>/SKILL.md` plus `references/`, `templates/`, `scripts/`, `assets/` support files; `skills_list` / `skill_view` / `skill_manage` with the original JSON Schemas | `tools/skills_tool.py`, `tools/skill_manager_tool.py` |
 | **Skill linter** | all 15 advisory rules from Hermes (name format, marketing words, missing metadata, oversized body, shell-utility prose, incident-log shape, dangling links, POSIX gating, forbidden files, references sprawl …); only new violations are reported | `tools/skill_linter.py` |
 | **Background review fork** | after a sufficiently long turn, an in-process subagent replays the transcript and receives the Hermes review prompt **as its user message** (system prompt untouched, like upstream); it saves lessons through the tools | `agent/background_review.py`, `agent/turn_finalizer.py` |
@@ -35,7 +35,7 @@ commands here. They run without a model turn and answer in the chat:
 | Command | Subcommands / arguments | Behaviour |
 | --- | --- | --- |
 | `/skills` | `pending` · `approve <id\|all>` · `reject <id\|all>` · `diff <id>` · `approval <on\|off>` | inspect the staged skill queue, replay or drop a proposal, render its unified diff, flip the gate |
-| `/memory` | `pending` · `approve <id\|all>` · `reject <id\|all>` · `approval <on\|off>` | same for memory writes; a replace/remove shows the exact entry it pinned at staging time |
+| `/memory` | `pending` · `approve <id\|all>` · `reject <id\|all>` · `approval <on\|off>` | same for memory writes; a patch/remove shows the exact entry it pinned at staging time |
 | `/curator` | `status` · `run [--dry-run] [--consolidate]` · `pause` · `resume` · `pin <skill>` · `unpin <skill>` · `restore <skill>` · `list-archived` | inspect the schedule, run a pass now, pin survivors, restore an archived skill |
 | `/refine [focus]` | optional free-text focus | fork a background review **now** instead of waiting for the nudge; the same staging rules apply |
 | `/learn <request>` | free text, or nothing for "this conversation" | queue Hermes' skill-authoring prompt as the next ordinary user turn |
@@ -146,6 +146,11 @@ Every option is a `.volatile()` schemastery field and can be changed live from t
 | `skillsWriteApproval` | `false` | stage every skill write for approval (hermes `skills.write_approval`) |
 | `memoryWriteApproval` | `false` | stage every memory write for approval (hermes `memory.write_approval`) |
 | `skillNudgeInterval` | `10` | tool iterations before a skill review (hermes `agent.skills.creation_nudge_interval`) |
+| `reviewMaxIterations` | `16` | tool-dispatch budget for one review fork (hermes `_REVIEW_MAX_ITERATIONS`); past it calls are denied and the fork must answer |
+
+Background reviews are also throttled to one per session per 30 minutes
+(hermes' 1800s guard): a trigger that hits the window is kept and retried on the
+next completed turn instead of being dropped.
 | `memoryNudgeInterval` | `10` | user turns before a memory review (hermes `memory.nudge_interval`) |
 | `reviewTimeoutSec` | `300` | fork timeout |
 | `provider` / `model` | `''` | aux model for the fork; empty = host default |
@@ -185,7 +190,7 @@ the ported Hermes semantics always apply inside those passes.
 3. **Read-before-write.** A patch or overwrite must be preceded by a `skill_view` of that exact file in the same review turn. Refusals behave like Hermes: view once, retry once, do not loop.
 4. **No prompt-cache mutation.** Memory is rendered as a per-session frozen snapshot and skills are never reloaded into an existing prompt; everything that enters a running session does so as a message or tool result.
 5. **Corrupt state fails safe.** Unparseable usage records, timestamps, or curator state mean "do nothing", never "archive everything".
-6. **Unattended writes are gated.** Memory `replace`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). With `skillsWriteApproval` or `memoryWriteApproval` on, every corresponding write is staged as a complete, replayable proposal under `pending/`; approving it (panel, `/skills approve`, `/memory approve`) replays it through the same write machinery (D6). A pinned memory entry that changed after staging is refused rather than written blind.
+6. **Unattended writes are gated.** Memory `patch`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). With `skillsWriteApproval` or `memoryWriteApproval` on, every corresponding write is staged as a complete, replayable proposal under `pending/`; approving it (panel, `/skills approve`, `/memory approve`) replays it through the same write machinery (D6). A pinned memory entry that changed after staging is refused rather than written blind.
 
 ## Development
 

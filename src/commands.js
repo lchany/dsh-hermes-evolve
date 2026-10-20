@@ -94,8 +94,16 @@ function changedEntries (outcome, kind) {
   const applied = Array.isArray(outcome.applied) ? outcome.applied : []
   const out = []
   for (const op of applied) {
-    if (kind === 'replaced' && typeof op.previous === 'string') out.push(op.previous)
-    if (kind === 'removed' && typeof op.removed === 'string') out.push(op.removed)
+    // hermes `_changed_entries`: `patched` shows the entry BEFORE the splice (the
+    // approve output labels it 'as it was before the edit'), and each section is
+    // selected by the op's own action — a legacy `replace` is not a patch.
+    const action = String(op.action || '')
+    if (kind === 'replaced' && action === 'replace' && typeof op.previous === 'string') out.push(op.previous)
+    if (kind === 'patched' && action === 'patch') {
+      const before = typeof op.previous === 'string' ? op.previous : (typeof op.patched === 'string' ? op.patched : null)
+      if (before !== null) out.push(before)
+    }
+    if (kind === 'removed' && action === 'remove' && typeof op.removed === 'string') out.push(op.removed)
   }
   return out
 }
@@ -122,6 +130,7 @@ async function approve (subsystem, args, deps) {
   let applied = 0
   const failed = []
   const overwritten = []
+  const patched = []
   const removed = []
   for (const row of targets) {
     let ok = false
@@ -132,6 +141,7 @@ async function approve (subsystem, args, deps) {
       message = outcome.ok === true ? '' : String(outcome.detail || outcome.reason || 'apply failed')
       if (ok) {
         overwritten.push(...changedEntries(outcome, 'replaced').map((text) => `  ${row.id}: ${text}`))
+        patched.push(...changedEntries(outcome, 'patched').map((text) => `  ${row.id}: ${text}`))
         removed.push(...changedEntries(outcome, 'removed').map((text) => `  ${row.id}: ${text}`))
       }
     } else {
@@ -158,6 +168,10 @@ async function approve (subsystem, args, deps) {
   if (overwritten.length > 0) {
     out.push('Overwrote entire entry (re-add anything you still need):')
     out.push(...overwritten)
+  }
+  if (patched.length > 0) {
+    out.push('Patched entry (as it was before the edit):')
+    out.push(...patched)
   }
   if (removed.length > 0) {
     out.push('Removed entry (re-add anything you still need):')

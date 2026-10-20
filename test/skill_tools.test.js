@@ -6,6 +6,7 @@ const { join } = require('node:path')
 const { readFile, access } = require('node:fs/promises')
 
 const { buildToolSet } = require('../src/skill_tools')
+const memory = require('../src/memory')
 const store = require('../src/skill_store')
 const { withHome } = require('./helpers')
 
@@ -123,7 +124,94 @@ test('skills_list reports the catalog in hermes shape', async () => {
 async function exists (path) {
   try { await access(path); return true } catch { return false }
 }
-test('an unattended fork may add memory but never replace/remove it', async () => {
+test('memory tool offers add/patch/remove and refuses replace with a redirect', async () => {
+  await withHome(async (home) => {
+    const tools = buildToolSet({ memoryCharLimit: 2200, userCharLimit: 1375 })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+
+    const added = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'add', content: 'Works on project X with weekly reports' }, exec))
+    assert.equal(added.success, true)
+
+    const replaced = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'replace', old_text: 'project X', content: 'project Y' }, exec))
+    assert.equal(replaced.success, false)
+    assert.match(replaced.error, /^'replace' is not available; use 'patch'\. old_text is the exact span/)
+
+    const patched = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'patch', old_text: 'project X', content: 'project Y' }, exec))
+    assert.equal(patched.success, true)
+    const loaded = await memory.readStore(join(home, 'memories'), 'memory')
+    assert.deepEqual(loaded.entries, ['Works on project Y with weekly reports'])
+  })
+})
+
+test('a single patch without old_text echoes the store like Hermes', async () => {
+  await withHome(async (home) => {
+    await memory.writeMemory(join(home, 'memories'), 'memory', [{ action: 'add', text: 'Existing fact' }], { limit: 2200 })
+    const tools = buildToolSet({ memoryCharLimit: 2200, userCharLimit: 1375 })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+    const missing = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'patch', content: 'new text' }, exec))
+    assert.equal(missing.success, false)
+    assert.match(missing.error, /^'patch' needs old_text -- a short unique substring of the entry to patch\./)
+    assert.deepEqual(missing.current_entries, ['Existing fact'])
+    assert.match(missing.usage, /^\d+\/2200$/)
+  })
+})
+
+test('a batch that still names replace is refused before staging', async () => {
+  await withHome(async () => {
+    const tools = buildToolSet({ memoryCharLimit: 2200, userCharLimit: 1375 })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+    const outcome = JSON.parse(await memoryTool.execute({
+      target: 'memory',
+      operations: [{ action: 'add', content: 'one' }, { action: 'replace', old_text: 'one', content: 'two' }],
+    }, exec))
+    assert.equal(outcome.success, false)
+    assert.match(outcome.error, /'replace' is not available; use 'patch'/)
+    assert.equal((await store.listPending()).length, 0)
+  })
+})
+
+test('approval mode stages a patch with Hermes\' summary and pinned entry', async () => {
+  await withHome(async (home) => {
+    await memory.writeMemory(join(home, 'memories'), 'memory', [{ action: 'add', text: 'Runs the quant tuning loop nightly' }], { limit: 2200 })
+    const tools = buildToolSet({ memoryCharLimit: 2200, userCharLimit: 1375, writeApproval: true })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+    const staged = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'patch', old_text: 'nightly', content: 'every six hours' }, exec))
+    assert.equal(staged.success, true)
+    assert.equal(staged.staged, true)
+    const pending = await store.listPending()
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0].summary, "patch in memory: entry matching: nightly\nspan 'nightly' becomes: every six hours (rest of the entry is kept)")
+    assert.equal(pending[0].operations[0].matched_entry, 'Runs the quant tuning loop nightly')
+  })
+})
+
+test('a mirrored patch reaches on_memory_write as a replace of the patched entry', async () => {
+  await withHome(async () => {
+    const seen = []
+    const tools = buildToolSet({
+      memoryCharLimit: 2200,
+      userCharLimit: 1375,
+      onMemoryWrite: (rows) => seen.push(...rows),
+    })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+    await memoryTool.execute({ target: 'user', action: 'add', content: 'Works on project X with weekly reports' }, exec)
+    await memoryTool.execute({ target: 'user', action: 'patch', old_text: 'project X', content: 'project Y' }, exec)
+    assert.equal(seen.length, 2)
+    assert.deepEqual(seen[1], {
+      action: 'replace',
+      target: 'user',
+      content: 'Works on project Y with weekly reports',
+      previous_content: 'Works on project X with weekly reports',
+    })
+  })
+})
+
+test('an unattended fork may add memory but never patch/remove it', async () => {
   await withHome(async (home) => {
     const tools = buildToolSet({ unattendedMemory: true, memoryCharLimit: 2200, userCharLimit: 1375 })
     const memoryTool = tools.find((tool) => tool.name === 'memory')
@@ -133,7 +221,7 @@ test('an unattended fork may add memory but never replace/remove it', async () =
     assert.equal(added.success, true)
     assert.equal(added.staged, undefined)
 
-    const staged = JSON.parse(await memoryTool.execute({ target: 'user', action: 'replace', old_text: 'terse', content: 'Prefers verbose answers.' }, exec))
+    const staged = JSON.parse(await memoryTool.execute({ target: 'user', action: 'patch', old_text: 'terse', content: 'verbose' }, exec))
     assert.equal(staged.success, true)
     assert.equal(staged.staged, true)
     assert.equal(staged.proposal_staged, true)
@@ -143,7 +231,7 @@ test('an unattended fork may add memory but never replace/remove it', async () =
     assert.equal(pending.length, 1)
     assert.equal(pending[0].kind, 'memory')
     assert.equal(pending[0].target, 'user')
-    assert.equal(pending[0].operations[0].action, 'replace')
+    assert.equal(pending[0].operations[0].action, 'patch')
     assert.equal(pending[0].operations[0].matched_entry, 'Prefers terse answers.', 'an unattended stage pins the entry too (memory_tool.py:199)')
 
     // The entry on disk is unchanged: staging never applies silently.
