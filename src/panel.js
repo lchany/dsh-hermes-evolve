@@ -68,7 +68,7 @@ function readBody (req) {
 /** Settings fields a panel may edit — a whitelist so a typo cannot inject a
  *  schema key the host would silently drop. */
 const EDITABLE_SETTINGS = [
-  'enabled', 'mode', 'memoryMode', 'skillsMode', 'provider', 'model',
+  'enabled', 'memoryWriteApproval', 'skillsWriteApproval', 'provider', 'model',
   'skillNudgeInterval', 'memoryNudgeInterval', 'reviewTimeoutSec',
   'signalTriggerEnabled', 'signalToolFailureMin',
   'memoryInjectionEnabled', 'memoryEnabled', 'userProfileEnabled',
@@ -485,7 +485,8 @@ function renderStatus (s) {
   settingsEl.innerHTML = [
     ...BOOL_FIELDS.map((k) => '<label class="field"><span>' + k + '</span><input type="checkbox" data-set="' + k + '" ' + (s.settings[k] ? 'checked' : '') + '></label>'),
     ...NUM_FIELDS.map((k) => '<label class="field"><span>' + k + '</span><input type="number" data-set="' + k + '" value="' + esc(s.settings[k]) + '"></label>'),
-    '<label class="field"><span>mode</span><select data-set="mode">' + ['auto','approval','log-only'].map((m) => '<option ' + (s.settings.mode === m ? 'selected' : '') + '>' + m + '</option>').join('') + '</select></label>',
+    '<label class="field"><span>skills write approval</span><select data-set="skillsWriteApproval">' + [false,true].map((v) => '<option value="' + v + '" ' + (s.settings.skillsWriteApproval === v ? 'selected' : '') + '>' + (v ? 'on' : 'off') + '</option>').join('') + '</select></label>',
+        '<label class="field"><span>memory write approval</span><select data-set="memoryWriteApproval">' + [false,true].map((v) => '<option value="' + v + '" ' + (s.settings.memoryWriteApproval === v ? 'selected' : '') + '>' + (v ? 'on' : 'off') + '</option>').join('') + '</select></label>',
     '<label class="field"><span>coachingMode</span><select data-set="coachingMode">' + ['full','patch-only','off'].map((m) => '<option ' + (s.settings.coachingMode === m ? 'selected' : '') + '>' + m + '</option>').join('') + '</select></label>',
     '<div class="row" style="margin-top:8px"><button class="primary" id="save-settings">Save</button></div>',
   ].join('')

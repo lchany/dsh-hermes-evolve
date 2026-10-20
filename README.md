@@ -6,7 +6,7 @@ Hermes Agent's **self-evolution loop**, ported to [DeepSeek Harness](https://git
 
 - **Fidelity first.** The review/curator prompts and the four tool schemas are extracted **verbatim** from `NousResearch/hermes-agent@d923a5eb48` (v0.22.2). No paraphrase, no invented protocols. `scripts/extract_prompts.py` reproduces the artifacts. [COMPATIBILITY.md](COMPATIBILITY.md) maps every Hermes module to its file here and lists every deviation the DSH runtime forces.
 - **Pluggable.** One dependency + one `dsh.profile.bundles` entry. Remove them and it is gone — no core patches, no forked DSH.
-- **Safe by construction.** Review and curator `delete` = **archive**. Read-before-write is enforced. Pinned and user-authored skills are never auto-transitioned. Approval mode stages writes for a human.
+- **Safe by construction.** Review and curator `delete` = **archive**. Read-before-write is enforced. Pinned and user-authored skills are never auto-transitioned. `skills.write_approval` / `memory.write_approval` stage writes for a human, exactly like Hermes' own booleans.
 
 ---
 
@@ -24,6 +24,27 @@ Hermes Agent's **self-evolution loop**, ported to [DeepSeek Harness](https://git
 | **Web panel** | `/hermes-evolve` page + `/hermes-evolve/api` JSON: status, memory, skills, pending approvals, backups/restore, curator controls, live settings | — (DSH `webServer` route) |
 
 The four model-facing tools are registered **globally**, so the main session and every review fork share the same stores. When a review saves a skill, the next session finds it in the skill catalog; when memory is updated, the next session's prompt reflects it.
+
+---
+
+## Chat commands
+
+The same five control points Hermes exposes in the Desktop chat are registered
+commands here. They run without a model turn and answer in the chat:
+
+| Command | Subcommands / arguments | Behaviour |
+| --- | --- | --- |
+| `/skills` | `pending` · `approve <id\|all>` · `reject <id\|all>` · `diff <id>` · `approval <on\|off>` | inspect the staged skill queue, replay or drop a proposal, render its unified diff, flip the gate |
+| `/memory` | `pending` · `approve <id\|all>` · `reject <id\|all>` · `approval <on\|off>` | same for memory writes; a replace/remove shows the exact entry it pinned at staging time |
+| `/curator` | `status` · `run [--dry-run] [--consolidate]` · `pause` · `resume` · `pin <skill>` · `unpin <skill>` · `restore <skill>` · `list-archived` | inspect the schedule, run a pass now, pin survivors, restore an archived skill |
+| `/refine [focus]` | optional free-text focus | fork a background review **now** instead of waiting for the nudge; the same staging rules apply |
+| `/learn <request>` | free text, or nothing for "this conversation" | queue Hermes' skill-authoring prompt as the next ordinary user turn |
+
+`/skills approval on` and `/memory approval on` write the corresponding boolean
+through the DSH settings document, so the panel and the settings page stay in
+sync. Hermes' hub-only subcommands (`/skills bundles`, `/skills journey`, …) and
+its terminal-only curator commands (`ledger`, `rollback`, `purge`, …) are not
+ported: they have no Desktop surface upstream either.
 
 ---
 
@@ -111,7 +132,7 @@ checklist in [`AUDIT.md`](AUDIT.md).
 | `$DSH_HOME/skills/.archive/<name>` | archived skill packages (recoverable) |
 | `$DSH_HOME/skills/.curator_backups/` | backup snapshots, blobs, reports |
 | `$DSH_HOME/skills/.curator_ledger.jsonl` | append-only action ledger |
-| `$DSH_HOME/hermes-evolve/pending/` | writes staged in approval mode |
+| `$DSH_HOME/hermes-evolve/pending/` | writes staged by the approval gates |
 
 `$DSH_HOME` defaults to `~/.dsh`.
 
@@ -122,7 +143,8 @@ Every option is a `.volatile()` schemastery field and can be changed live from t
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | master switch for the background loop |
-| `mode` | `auto` | `auto` \| `approval` \| `log-only` |
+| `skillsWriteApproval` | `false` | stage every skill write for approval (hermes `skills.write_approval`) |
+| `memoryWriteApproval` | `false` | stage every memory write for approval (hermes `memory.write_approval`) |
 | `skillNudgeInterval` | `10` | tool iterations before a skill review (hermes `agent.skills.creation_nudge_interval`) |
 | `memoryNudgeInterval` | `10` | user turns before a memory review (hermes `memory.nudge_interval`) |
 | `reviewTimeoutSec` | `300` | fork timeout |
@@ -163,7 +185,7 @@ the ported Hermes semantics always apply inside those passes.
 3. **Read-before-write.** A patch or overwrite must be preceded by a `skill_view` of that exact file in the same review turn. Refusals behave like Hermes: view once, retry once, do not loop.
 4. **No prompt-cache mutation.** Memory is rendered as a per-session frozen snapshot and skills are never reloaded into an existing prompt; everything that enters a running session does so as a message or tool result.
 5. **Corrupt state fails safe.** Unparseable usage records, timestamps, or curator state mean "do nothing", never "archive everything".
-6. **Unattended writes are gated.** Memory `replace`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). In `approval` mode every skill and memory write is staged as a complete, replayable proposal under `pending/`; approving it in the panel replays it through the same write machinery (D6).
+6. **Unattended writes are gated.** Memory `replace`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). With `skillsWriteApproval` or `memoryWriteApproval` on, every corresponding write is staged as a complete, replayable proposal under `pending/`; approving it (panel, `/skills approve`, `/memory approve`) replays it through the same write machinery (D6). A pinned memory entry that changed after staging is refused rather than written blind.
 
 ## Development
 

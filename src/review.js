@@ -160,7 +160,7 @@ async function runReview (hostCtx, options) {
   // hermes: the memory toolset enters the whitelist only when the memory
   // dimension actually fired AND memory is enabled; the prompt suffix follows
   // the same flag so the fork is never told about a tool it cannot call.
-  const memoryAllowed = reviewMemory === true && settings.memoryEnabled !== false && settings.memoryMode !== 'off'
+  const memoryAllowed = reviewMemory === true && settings.memoryEnabled !== false
   const reason = prompts.reviewPrompt({ reviewMemory, reviewSkills })
   const extra = typeof focus === 'string' && focus.trim() !== '' ? `\n\nFocus requested by the user: ${focus}` : ''
   const userMessage = prompts.buildReviewMessage({ transcript, prompt: reason, memoryAllowed }) + extra
@@ -191,7 +191,8 @@ async function runReview (hostCtx, options) {
     // never applied silently (hermes #105921).
     unattendedMemory: true,
     // Approval mode: the fork may read and propose, but a human lands the write.
-    writeApproval: settings.mode === 'approval',
+    writeApproval: settings.skillsWriteApproval === true,
+    memoryApproval: settings.memoryWriteApproval === true,
     lang: settings.lang,
   })
 
@@ -322,7 +323,8 @@ function sumReviewUsage (agent) {
  * Per-session counters. hermes keeps these on the AIAgent instance; a host-plane
  * plugin sees every session's events, so the map is keyed by session id.
  */
-function createScheduler ({ hostCtx, settings, logger }) {
+function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl }) {
+  const doReview = typeof reviewImpl === 'function' ? reviewImpl : runReview
   const sessions = new Map()
   const inFlight = new Set()
 
@@ -382,10 +384,10 @@ function createScheduler ({ hostCtx, settings, logger }) {
         const reason = event.data && event.data.reason ? event.data.reason.kind : 'completed'
         const interrupted = reason !== 'completed' || state.lastTurnInterrupted
         const skillInterval = settings.skillNudgeInterval > 0 ? settings.skillNudgeInterval : 0
-        const memoryInterval = settings.memoryMode !== 'off' && settings.memoryEnabled !== false && settings.memoryNudgeInterval > 0
+        const memoryInterval = settings.memoryEnabled !== false && settings.memoryNudgeInterval > 0
           ? settings.memoryNudgeInterval
           : 0
-        const fireSkills = settings.skillsMode !== 'off' && skillInterval > 0 && state.itersSinceSkill >= skillInterval
+        const fireSkills = skillInterval > 0 && state.itersSinceSkill >= skillInterval
         const fireMemory = memoryInterval > 0 && state.turnsSinceMemory >= memoryInterval
         if (fireSkills) state.itersSinceSkill = 0
         if (fireMemory) state.turnsSinceMemory = 0
@@ -395,10 +397,6 @@ function createScheduler ({ hostCtx, settings, logger }) {
         state.lastTurnInterrupted = false
         state.lastUserMessage = ''
         if (interrupted || !hadResponse || (!fireSkills && !fireMemory)) return
-        if (settings.mode === 'log-only') {
-          logger?.info?.(`[hermes-evolve] log-only: would review skills=${fireSkills} memory=${fireMemory}`)
-          return
-        }
         const key = session.id
         if (inFlight.has(key)) {
           logger?.debug?.('[hermes-evolve] review already in flight for this session; skipping')
@@ -406,7 +404,7 @@ function createScheduler ({ hostCtx, settings, logger }) {
         }
         inFlight.add(key)
         try {
-          const result = await runReview(hostCtx, {
+          const result = await doReview(hostCtx, {
             cwd: session.header && session.header.cwd ? session.header.cwd : process.cwd(),
             messages: transcript,
             reviewMemory: fireMemory,
@@ -414,9 +412,6 @@ function createScheduler ({ hostCtx, settings, logger }) {
             settings,
             logger,
           })
-          if (result.ok && settings.mode === 'approval') {
-            await store.stagePending({ kind: 'review', sessionId: session.id, scope: result.scope, summary: result.summary })
-          }
           if (result.ok && result.summary) {
             appendReviewNotice(session, result, logger)
           }

@@ -599,6 +599,80 @@ async function opDelete (op, name, ctx, bag) {
 const BG_DELETE_ACTIONS = new Set(['replace', 'remove'])
 const BG_DELETE_REFUSAL = "Background review may not delete memory entries ('replace'/'remove', including in a batch); 'add' is still available."
 
+/** Hermes' `_STORE_ACTIONS[...][1]` gate text + `stage_write`'s summary suffix. */
+function memorySummaryText (target, operations) {
+  const label = target === 'user' ? 'user profile' : 'memory'
+  const clip = (text) => String(text || '').slice(0, 120)
+  if (operations.length > 1) {
+    const lines = operations.map((op) => {
+      if (op.action === 'remove') return `- remove: ${op.oldText || ''}`
+      return `- ${op.action}: ${op.text || ''}`
+    })
+    return `apply ${operations.length} op(s) to ${label}: ${clip(lines.join('\n'))}`
+  }
+  const op = operations[0]
+  if (op.action === 'replace') {
+    return `replace in ${label}: ${clip(`entry matching: ${op.oldText || ''}\nwhole entry becomes: ${op.text || ''}`)}`
+  }
+  if (op.action === 'remove') return `remove from ${label}: ${clip(op.oldText || '')}`
+  return `add to ${label}: ${clip(op.text || '')}`
+}
+
+/**
+ * Pin each staged replace/remove to the FULL entry it selects now (hermes
+ * `_pin_matched_entries`): approval then applies to exactly the entry the
+ * approver reviewed, and re-running the search at approve time cannot hit a
+ * newer entry that merely contains the same substring. Returns the error the
+ * direct write would have returned when a search fails now.
+ */
+async function pinMatchedEntries (target, operations) {
+  let entries
+  try {
+    const loaded = await memory.readStore(memoryDir(), target)
+    entries = loaded.entries
+  } catch (error) {
+    return { ok: false, detail: `The memory file could not be read: ${error && error.message ? error.message : error}` }
+  }
+  const pinned = []
+  let current = entries.slice()
+  for (const op of operations) {
+    if (!BG_DELETE_ACTIONS.has(op.action)) {
+      pinned.push(op)
+      continue
+    }
+    const found = memory.findEntry(current, op.oldText)
+    if (found.error !== undefined) {
+      const detail = found.error === 'no-match'
+        ? `No entry matching '${String(op.oldText || '').slice(0, 80)}' was found.`
+        : found.error === 'empty'
+          ? `old_text is required for '${op.action}' action.`
+          : `'${String(op.oldText || '').slice(0, 60)}' matches ${found.candidates.length} entries; quote more of the entry.`
+      return { ok: false, detail }
+    }
+    pinned.push({ ...op, matched_entry: current[found.index] })
+    const applied = memory.applyOne(current, op)
+    if (applied.ok === true) current = applied.entries
+  }
+  return { ok: true, operations: pinned }
+}
+
+/** Stage one memory write for approval, with Hermes' summary + pinned entries. */
+async function stageMemoryOperations ({ target, limit, operations, approval }) {
+  // hermes pins entries only on the approval path (`_pin_matched_entries` runs
+  // inside `_gate_or_stage`); an unattended review stages the raw payload.
+  const pinned = approval === true ? await pinMatchedEntries(target, operations) : { ok: true, operations }
+  if (pinned.ok !== true) return { ok: false, error: pinned.detail }
+  const row = await store.stagePending({
+    kind: 'memory',
+    target,
+    limit,
+    operations: pinned.operations,
+    summary: memorySummaryText(target, operations),
+    actor: approval === true ? 'write-approval' : 'background-review',
+  })
+  return { ok: true, row }
+}
+
 /** hermes `stage_write` response for an unattended destructive memory edit. */
 function stagedMemoryEnvelope (row) {
   return json({
@@ -613,7 +687,9 @@ function stagedMemoryEnvelope (row) {
 
 async function handleMemory (args, ctx) {
   try {
-    const approval = ctx.writeApproval === true
+    // `memory.write_approval` is its own gate in Hermes; the legacy single flag
+    // stays honoured when no subsystem-specific value was supplied (old callers).
+    const approval = ctx.memoryApproval !== undefined ? ctx.memoryApproval === true : ctx.writeApproval === true
     const target = args && args.target ? String(args.target) : 'memory'
     if (target !== 'memory' && target !== 'user') {
       return fail(`Invalid memory target '${target}'. Use 'memory' or 'user'.`)
@@ -635,18 +711,14 @@ async function handleMemory (args, ctx) {
       // Approval mode stages EVERY batch, as `evaluate_gate` does for a gated
       // subsystem; an unattended review stages only the destructive ones.
       if (approval || (ctx.unattendedMemory === true && normalized.some((op) => BG_DELETE_ACTIONS.has(op.action)))) {
-        let row
+        let staged
         try {
-          row = await store.stagePending({
-            kind: 'memory',
-            target,
-            limit,
-            operations: normalized,
-            actor: approval ? 'write-approval' : 'background-review',
-          })
+          staged = await stageMemoryOperations({ target, limit, operations: normalized, approval })
         } catch (error) {
           return fail(approval ? `Could not stage the change for approval: ${error.message}` : BG_DELETE_REFUSAL)
         }
+        if (staged.ok !== true) return fail(approval ? staged.error : BG_DELETE_REFUSAL)
+        const row = staged.row
         if (!row || row.id === undefined) return fail(approval ? 'Could not stage the change for approval.' : BG_DELETE_REFUSAL)
         return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row)
       }
@@ -665,18 +737,14 @@ async function handleMemory (args, ctx) {
       return fail(`old_text is required for '${action}': a short unique substring identifying the existing entry.`)
     }
     if (approval || (ctx.unattendedMemory === true && BG_DELETE_ACTIONS.has(action))) {
-      let row
+      let staged
       try {
-        row = await store.stagePending({
-          kind: 'memory',
-          target,
-          limit,
-          operations: [{ action, text: content, oldText }],
-          actor: approval ? 'write-approval' : 'background-review',
-        })
+        staged = await stageMemoryOperations({ target, limit, operations: [{ action, text: content, oldText }], approval })
       } catch (error) {
         return fail(approval ? `Could not stage the change for approval: ${error.message}` : BG_DELETE_REFUSAL)
       }
+      if (staged.ok !== true) return fail(approval ? staged.error : BG_DELETE_REFUSAL)
+      const row = staged.row
       if (!row || row.id === undefined) return fail(approval ? 'Could not stage the change for approval.' : BG_DELETE_REFUSAL)
       return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row)
     }

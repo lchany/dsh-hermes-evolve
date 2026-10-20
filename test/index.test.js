@@ -21,6 +21,7 @@ function fakeContext (overrides = {}) {
   const listeners = new Map()
   const injected = []
   const effects = []
+  const commandDefs = []
 
   const settingsValues = overrides.settingsValues || {}
 
@@ -44,6 +45,10 @@ function fakeContext (overrides = {}) {
     },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test' }) },
     sessions: { list: () => [] },
+    commands: {
+      register: (definition) => { commandDefs.push(definition); return () => {} },
+    },
+    emit: () => {},
     on: (name, handler) => {
       const list = listeners.get(name) || []
       list.push(handler)
@@ -64,13 +69,13 @@ function fakeContext (overrides = {}) {
     },
     get: (name) => ctx[name],
   }
-  return { ctx, sections, contexts, tools, disposers, listeners, injected, effects }
+  return { ctx, sections, contexts, tools, disposers, listeners, injected, effects, commandDefs }
 }
 
 test('the package exports the plugin shape the host expects', () => {
   assert.equal(plugin.name, 'hermes-evolve')
   assert.ok(Array.isArray(plugin.inject))
-  for (const service of ['settings', 'systemPrompt', 'tools', 'agents', 'agentDefaultModel', 'sessions']) {
+  for (const service of ['settings', 'systemPrompt', 'tools', 'agents', 'agentDefaultModel', 'sessions', 'commands']) {
     assert.ok(plugin.inject.includes(service), `missing injected service ${service}`)
   }
   assert.equal(typeof plugin.apply, 'function')
@@ -79,7 +84,7 @@ test('the package exports the plugin shape the host expects', () => {
 
 test('apply() wires prompts, tools, session subscription and the panel', async () => {
   await withHome(async () => {
-    const { ctx, sections, contexts, tools, injected, listeners } = fakeContext()
+    const { ctx, sections, contexts, tools, injected, listeners, commandDefs } = fakeContext()
     plugin.apply(ctx, { skillNudgeInterval: 3 })
 
     const sectionNames = sections.map((section) => section.name)
@@ -95,6 +100,9 @@ test('apply() wires prompts, tools, session subscription and the panel', async (
 
     assert.equal(listeners.has('session/event'), true)
     assert.equal(listeners.has('settings/document-updated'), true)
+
+    // The five Hermes-surface commands are global registrations.
+    assert.deepEqual(commandDefs.map((definition) => definition.name), ['skills', 'memory', 'curator', 'refine', 'learn'])
 
     // The web panel is registered through a (possibly deferred) inject.
     assert.ok(injected.some((item) => item.names.includes('webServer')))
@@ -236,7 +244,7 @@ test('a materialised placeholder never reaches consumers', async () => {
     plugin.apply(ctx, { mode: {}, skillNudgeInterval: {}, provider: {} })
     const boot = lines.find((line) => line.includes('active —'))
     assert.ok(boot, 'boot line is logged')
-    assert.match(boot, /mode=auto/)
+    assert.match(boot, /approvals\(skills\/memory\)=off\/off/)
     assert.match(boot, /curator=on/)
   })
 })

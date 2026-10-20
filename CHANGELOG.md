@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Hermes' Desktop control points, ported as DSH commands.
+
+### Added
+
+- `/skills`, `/memory`, `/curator`, `/refine`, `/learn` as registered host
+  commands (`src/commands.js`). Text is Hermes' own: `pending` / `approve` /
+  `reject` / `diff` / `approval` for the write queues, the eight Desktop curator
+  subcommands, `⚗ Reviewing this conversation in the background (focus: …)`,
+  and the learn prompt as an ordinary user turn.
+- `/skills diff <id>` renders the staged operations as unified diffs, folded so
+  each op diffs against the ones before it.
+- `/refine [focus]` runs the review fork immediately, with the same staging and
+  notice path as the background scheduler.
+
+### Changed
+
+- Write approval is two independent booleans —
+  `skills.write_approval` / `memory.write_approval` — matching Hermes, replacing
+  the single `mode: auto|approval|log-only` switch. The panel and the settings
+  page both edit the same pair.
+- A memory `replace`/`remove` staged for approval pins the exact entry it
+  matched; approving after that entry changed or disappeared fails and leaves
+  the proposal pending instead of writing blind.
+
+### Fixed
+
+- The review fork still read the removed `mode` field for its approval gate;
+  it now reads both subsystem booleans (which also un-gates memory separately
+  from skills).
+
 ## [0.1.2] — 2026-10-21
 
 Verifiability release: "is this really Hermes?" is now something you run, not

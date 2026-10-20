@@ -33,7 +33,10 @@ const store = require('./skill_store')
 const skillTools = require('./skill_tools')
 const review = require('./review')
 const curator = require('./curator')
+const commands = require('./commands')
+const learnPrompt = require('./learn_prompt')
 const { registerPanelRoutes } = require('./panel')
+const { randomUUID } = require('node:crypto')
 
 const SETTINGS_NS = 'hermes-evolve'
 const PLUGIN = 'hermes-evolve'
@@ -253,6 +256,10 @@ function apply (ctx, config = {}) {
       maxBodyChars: settings.maxBodyChars,
       memoryCharLimit: settings.memoryCharLimit,
       userCharLimit: settings.userCharLimit,
+      // Hermes gates tool writes too, not just forks: `skills.write_approval` /
+      // `memory.write_approval` are read on every write path.
+      writeApproval: settings.skillsWriteApproval === true,
+      memoryApproval: settings.memoryWriteApproval === true,
       lang: settings.lang,
       // Hermes' `on_memory_write`: announce applied native writes so an
       // external provider (dsh-agentmemory) can mirror them. Emitted on the
@@ -421,7 +428,24 @@ function apply (ctx, config = {}) {
     logger.debug?.(`[${PLUGIN}] no webServer service; running without a panel: ${error && error.message}`)
   }
 
-  logger.info?.(`[${PLUGIN}] active — mode=${settings.mode} curator=${settings.curatorEnabled ? 'on' : 'off'} skills=${util.skillsDir()}`)
+  // ── user commands (Hermes' Desktop surface) ────────────────────────────
+  //
+  // `/skills`, `/memory`, `/curator`, `/refine`, `/learn` are plain chat
+  // commands in Hermes; DSH's command registry is the same seam, so the
+  // control points survive the port without a panel round-trip.
+  ctx.effect(() => commands.registerCommands(ctx, {
+    settings,
+    logger,
+    hostCtx: ctx,
+    persistSettings: (patch) => ctx.settings.update(SETTINGS_NS, patch),
+    runCuratorNow: (options) => curator.runNow({ hostCtx: ctx, settings, logger, ...options }),
+    runReview: review.runReview,
+    hasSkillManage,
+    learnPrompt,
+    randomId: () => randomUUID(),
+  }), `${PLUGIN}: commands`)
+
+  logger.info?.(`[${PLUGIN}] active — approvals(skills/memory)=${settings.skillsWriteApproval ? 'on' : 'off'}/${settings.memoryWriteApproval ? 'on' : 'off'} curator=${settings.curatorEnabled ? 'on' : 'off'} skills=${util.skillsDir()}`)
 }
 
 /**
@@ -463,7 +487,7 @@ function summarizeCuratorResult (result) {
 
 module.exports = {
   name: PLUGIN,
-  inject: ['settings', 'systemPrompt', 'tools', 'agents', 'agentDefaultModel', 'sessions'],
+  inject: ['settings', 'systemPrompt', 'tools', 'agents', 'agentDefaultModel', 'sessions', 'commands'],
   Config,
   apply,
   __internals: {

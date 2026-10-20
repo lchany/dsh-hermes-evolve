@@ -482,7 +482,7 @@ async function writeReport ({ automatic, consolidation, state }) {
 
 // ── lifecycle helpers used by the plugin and the panel ────────────────────
 
-async function status () {
+async function status (settings) {
   const state = await loadState()
   const skills = await store.scanSkills()
   const usage = await usageMod.loadUsage()
@@ -494,7 +494,7 @@ async function status () {
     else if (record.state === 'archived') counts.archived += 1
     else counts.active += 1
   }
-  const intervalHours = 24 * 7
+  const intervalHours = Number(settings && settings.curatorIntervalHours) || 24 * 7
   const dueIn = state.last_run_at === null
     ? 0
     : Math.max(0, intervalHours - (Date.now() - Date.parse(state.last_run_at)) / 3_600_000)
@@ -625,6 +625,72 @@ async function purgeArchived ({ days = 0, dryRun = false, nowMs = Date.now() } =
   }
 }
 
+
+// ── `curator restore|list-archived` (hermes_cli/curator.py:309, :560) ──────
+//
+// Restore is the inverse of `archiveSkillDir`: move a directory out of
+// `.archive/` back to the flat `skills/<name>` layout and flip the usage state
+// to active. Messages are `skill_usage.restore_skill`'s.
+
+/** Frontmatter `name:` of a SKILL.md, else the directory name. */
+async function skillNameOfDir (dir, fallback) {
+  const raw = await util.readFileSafe(path.join(dir, 'SKILL.md'))
+  if (raw === undefined) return fallback
+  const match = /^name:\s*(.+)$/m.exec(raw)
+  return match === null ? fallback : match[1].trim().replace(/^['"]|['"]$/g, '')
+}
+
+async function restoreArchived (skillName) {
+  const name = String(skillName || '').trim()
+  if (name === '') return { ok: false, message: 'a skill name is required' }
+  const archiveRoot = util.archiveDir()
+  if (!(await util.exists(archiveRoot))) return { ok: false, message: 'no archive directory' }
+  let entries = []
+  try {
+    entries = (await fsP.readdir(archiveRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(archiveRoot, entry.name))
+  } catch {
+    return { ok: false, message: 'no archive directory' }
+  }
+  const stamp = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d{14}$`)
+  let candidates = entries.filter((dir) => path.basename(dir) === name)
+  if (candidates.length === 0) {
+    candidates = entries
+      .filter((dir) => stamp.test(path.basename(dir)))
+      .sort()
+      .reverse()
+  }
+  if (candidates.length === 0) {
+    // Older archives were flattened under the DIRECTORY name (a different
+    // frontmatter name), so fall back to the frontmatter before giving up.
+    for (const dir of entries) {
+      if (await skillNameOfDir(dir, path.basename(dir)) === name) { candidates = [dir]; break }
+    }
+  }
+  if (candidates.length === 0) return { ok: false, message: `skill '${name}' not found in archive` }
+  const dest = path.join(util.skillsDir(), name)
+  if (await util.exists(dest)) return { ok: false, message: `destination already exists: ${dest}` }
+  await util.ensureDir(util.skillsDir())
+  try {
+    await fsP.rename(candidates[0], dest)
+  } catch (error) {
+    // Cross-device or a racing writer: fall back to a recursive copy.
+    try {
+      await fsP.cp(candidates[0], dest, { recursive: true, errorOnExist: true, force: false })
+      await fsP.rm(candidates[0], { recursive: true, force: true })
+    } catch (copyError) {
+      return { ok: false, message: `failed to restore: ${copyError && copyError.message ? copyError.message : copyError}` }
+    }
+  }
+  await usageMod.markState(name, 'active')
+  return { ok: true, message: `restored to ${dest}` }
+}
+
+async function listArchivedNames () {
+  return (await archivedSkillRows()).map((row) => row.name).sort()
+}
+
 module.exports = {
   ARCHIVE_DIR: util.archiveDir,
   loadState,
@@ -640,6 +706,9 @@ module.exports = {
   collectToolDeletes,
   purgeArchived,
   archivedSkillRows,
+  restoreArchived,
+  listArchivedNames,
+  skillNameOfDir,
   PURGE_DISABLED_MESSAGE,
   CURATOR_LOCK_STALE_SECONDS,
 }

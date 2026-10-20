@@ -24,9 +24,8 @@ function fakeSession (id = 'sess-1') {
 
 const SETTINGS = {
   enabled: true,
-  mode: 'log-only',
-  memoryMode: 'inherit',
-  skillsMode: 'inherit',
+  memoryWriteApproval: false,
+  skillsWriteApproval: false,
   memoryEnabled: true,
   skillNudgeInterval: 2,
   memoryNudgeInterval: 2,
@@ -38,12 +37,13 @@ function event (type, data) {
 }
 
 test('a review fires only after the iteration threshold and a completed turn', async () => {
-  const logs = []
+  let fired = 0
   const { session } = fakeSession()
   const scheduler = review.createScheduler({
     hostCtx: null,
     settings: SETTINGS,
-    logger: { info: (line) => logs.push(line), debug: () => {} },
+    logger: { info: () => {}, debug: () => {} },
+    runReview: async () => { fired += 1; return { ok: false, skipped: 'test' } },
   })
 
   // One tool iteration is not enough.
@@ -51,7 +51,7 @@ test('a review fires only after the iteration threshold and a completed turn', a
   await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
   await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }))
   await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
-  assert.equal(logs.length, 0)
+  assert.equal(fired, 0)
 
   // The second iteration crosses skillNudgeInterval=2.
   await scheduler.onEvent(session, event('step/end', {}))
@@ -59,8 +59,7 @@ test('a review fires only after the iteration threshold and a completed turn', a
   await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }))
   await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'done again' }] } }))
   await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
-  assert.equal(logs.length, 1)
-  assert.match(logs[0], /log-only: would review/)
+  assert.equal(fired, 1)
 })
 
 test('an interrupted or empty turn never triggers a review', async () => {

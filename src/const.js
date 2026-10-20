@@ -20,8 +20,10 @@ const DEFAULTS = {
   enabled: true,
   // auto = write directly, approval = stage to pending, log-only = never write
   mode: 'auto',
-  memoryMode: 'inherit', // inherit | auto | approval | log-only
-  skillsMode: 'inherit',
+  // Hermes gates are plain booleans: `memory.write_approval` / `skills.write_approval`
+  // (tools/write_approval.py:44 `write_approval_enabled`). No mode enum upstream.
+  memoryWriteApproval: false,
+  skillsWriteApproval: false,
   provider: '', // '' → the deployment's default model selection
   model: '',
 
@@ -100,9 +102,9 @@ function settingsSchema (S) {
   if (!S || typeof S.object !== 'function') return null
   return S.object({
     enabled: S.boolean().default(true).volatile(),
-    mode: S.union(['auto', 'approval', 'log-only']).default('auto').volatile(),
-    memoryMode: S.union(['inherit', 'auto', 'approval', 'log-only']).default('inherit').volatile(),
-    skillsMode: S.union(['inherit', 'auto', 'approval', 'log-only']).default('inherit').volatile(),
+    // Approval gate per subsystem, exactly Hermes' two config keys.
+    memoryWriteApproval: S.boolean().default(false).volatile(),
+    skillsWriteApproval: S.boolean().default(false).volatile(),
     provider: S.string().default('').volatile(),
     model: S.string().default('').volatile(),
 
