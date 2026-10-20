@@ -33,6 +33,56 @@ const { buildToolSet } = require('./skill_tools')
 
 const TRANSCRIPT_MESSAGE_CHARS = 4000
 
+// ── dispatch-side review whitelist (D4) ───────────────────────────────────
+//
+// Hermes does not only narrow the tools it ADVERTISES to a review fork; it also
+// enforces a whitelist at dispatch time through a thread-local
+// (`hermes_cli/plugins.py:set_thread_tool_whitelist`) and refuses anything else
+// with a fixed sentence (`agent/background_review.py:1153-1170`). Advertising
+// alone is insufficient: a model can still emit a call to a tool it was told
+// about earlier in the transcript, and an MCP/plugin tool registered between
+// fork creation and dispatch would slip through. This module owns the same
+// state so `apply()` can install one `tools/pre-execute` listener over it.
+
+const REVIEW_SESSION_PREFIX = 'hermes-evolve-review-'
+
+/** Tools a review fork may call by name. Mirrors `_review_tool_whitelist`. */
+const REVIEW_TOOL_ALLOW = Object.freeze(['skills_list', 'skill_view', 'skill_manage', 'read', 'glob', 'grep'])
+
+/**
+ * Review sessions currently in flight, mapped to their scope. A Map (not a
+ * session-id test alone) because whether `memory` is in scope is decided per
+ * review pass (`review_memory`), exactly like `_review_tool_whitelist`.
+ */
+const reviewSessions = new Map()
+
+/** The policy for a session id, or undefined when it is not a live review fork. */
+function reviewSessionPolicy (sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId.startsWith(REVIEW_SESSION_PREFIX)) return undefined
+  return reviewSessions.get(sessionId)
+}
+
+/** Whether a review fork in `policy`'s scope may dispatch `toolName`. */
+function reviewToolAllowed (toolName, policy) {
+  if (typeof toolName !== 'string') return true
+  if (REVIEW_TOOL_ALLOW.includes(toolName)) return true
+  return policy !== undefined && policy.memory === true && toolName === 'memory'
+}
+
+/**
+ * Hermes' denial sentence, verbatim, with the read-tool list mapped to this
+ * runtime's equivalents (`read_file`→`read`, `search_files`→`glob`/`grep`).
+ * `reason` on a `{kind:'deny'}` decision is the model-facing text.
+ */
+function reviewDenyReason (toolName, policy) {
+  const memoryAllowed = policy !== undefined && policy.memory === true
+  const memoryPhrase = memoryAllowed ? ' and memory for notes (add only)' : ''
+  return `Background review denied non-whitelisted tool: ${toolName}. Allowed here: `
+    + 'skill_view/skills_list/read/glob/grep to read, '
+    + `skill_manage(action='patch'|...) to change skills${memoryPhrase}. `
+    + `Do not retry ${toolName}.`
+}
+
 // ── transcript rendering ───────────────────────────────────────────────────
 
 function contentToText (content) {
@@ -151,6 +201,12 @@ async function runReview (hostCtx, options) {
         try { return hostCtx.agentDefaultModel.currentSelection() } catch { return undefined }
       })()
 
+  // Register the session's dispatch policy BEFORE the fork exists: the listener
+  // installed in apply() looks it up by session id, and the first tool call can
+  // land as soon as the fork starts.
+  const sessionId = `${REVIEW_SESSION_PREFIX}${randomUUID()}`
+  reviewSessions.set(sessionId, { memory: memoryAllowed })
+
   let handle
   const timer = setTimeout(() => {
     try { controller.abort() } catch { /* already aborted */ }
@@ -158,7 +214,7 @@ async function runReview (hostCtx, options) {
 
   try {
     handle = await hostCtx.agents.create({
-      sessionId: `hermes-evolve-review-${randomUUID()}`,
+      sessionId,
       meta: { cwd, origin: 'subagent', agentPreset: 'standard', isSeeded: false },
       agentOptions: selected && (selected.provider || selected.model)
         ? { ...(selected.provider ? { provider: selected.provider } : {}), ...(selected.model ? { model: selected.model } : {}) }
@@ -197,6 +253,7 @@ async function runReview (hostCtx, options) {
     return { ok: false, error: reason, durationMs: Date.now() - startedAt }
   } finally {
     clearTimeout(timer)
+    reviewSessions.delete(sessionId)
     if (handle !== undefined) {
       try { await handle.dispose() } catch { /* already gone */ }
     }
@@ -221,7 +278,9 @@ function restrictInheritedTools (agentCtx, logger) {
   const ours = new Set(['skills_list', 'skill_view', 'skill_manage', 'memory'])
   const inherited = globalNames.filter((name) => !ours.has(name))
   if (inherited.length === 0) return
-  const allow = inherited.filter((name) => ['read', 'glob', 'grep', 'read_file', 'search_files'].includes(name))
+  // The advertised surface and the dispatch whitelist must agree, or a tool
+  // would be shown and then denied — the denial storm hermes fixed in #39996.
+  const allow = inherited.filter((name) => REVIEW_TOOL_ALLOW.includes(name))
   try {
     if (allow.length > 0) agentCtx.tools.restrict({ allow })
     else agentCtx.tools.restrict({ deny: inherited })
@@ -413,4 +472,12 @@ module.exports = {
   contentToText,
   lastAssistantText,
   sumReviewUsage,
+  REVIEW_SESSION_PREFIX,
+  REVIEW_TOOL_ALLOW,
+  reviewSessionPolicy,
+  reviewToolAllowed,
+  reviewDenyReason,
+  // Tests drive the in-flight registry directly; production only touches it
+  // through runReview().
+  __reviewSessions: reviewSessions,
 }

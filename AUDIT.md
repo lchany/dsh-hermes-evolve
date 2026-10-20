@@ -81,7 +81,7 @@ grep -n "delete" src/skill_tools.js                   # action=delete 走 archiv
 - **prompt cache parity**：hermes 的 `build_cache_parity_fork` 复用的是同一份 provider 缓存；DSH 的会话/压缩模型不同，我们只对齐了「prompt 走 user message、不改写系统提示」这一条可对齐的约束（见 `COMPATIBILITY.md` D2/D3）。
 - **provenance 分支**：hermes 的 `bundled` / `hub` / `external` / cron-referenced 判定在 DSH 没有对应概念，`isProtected/isBundled/isCronReferenced` 恒为 false（D8）。
 - **CLI**：`hermes curator status/run/rollback/...` 未移植，等价物是面板（D11）。
-- **approval 模式的完整语义**：hermes 的 `skills.write_approval` 能把**任意**写入做成 staged diff；我们只对记忆的 replace/remove 做 staging，技能写入在 approval 模式下直接拒绝（D6）。
+- **approval 模式的完整语义**：hermes 的 `skills.write_approval` 能把**任意**写入做成 staged diff；本 port 现在把技能与记忆写入都 stage 成可重放提案（`kind:'skill'`/`'memory'`），面板批准后回放（D6）。残留：没有 `/skills pending` 命令面，只有面板。
 
 这些偏差全部在 [`COMPATIBILITY.md`](COMPATIBILITY.md) 的 D1–D12 里逐条列出 —— 判断「符合」之前先读那一节，**已知偏差不算 bug，未列出的偏差才算**。
 

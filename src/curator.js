@@ -519,6 +519,112 @@ async function runNow ({ hostCtx, settings, logger, dryRun = false, consolidate 
   return runCurator({ hostCtx, settings, logger, dryRun, consolidate, force: true, model })
 }
 
+// ── `curator purge` (hermes_cli/curator.py:_cmd_purge) ─────────────────────
+//
+// Purge is the one deletion path in the whole system, and the CLI is the only
+// implementation hermes has. Archiving is recoverable; aging the archive out is
+// not, so it needs an explicit TTL and must refuse to run without one. The
+// panel exposes the same arguments (`days`, `dryRun`) and the same refusals, so
+// the port no longer depends on an unported CLI for its destructive operation.
+
+const PURGE_DISABLED_MESSAGE =
+  'curator: purge disabled (curator.archive_ttl_days is 0). Set the config key or pass --days N to purge archives older than N days.'
+
+/**
+ * Archived skill directories with the timestamp the CLI ages them by:
+ * `max(record.archived_at, directory mtime)`. The directory mtime matters
+ * because `archiveSkillDir` touches it on purpose — a rename alone would keep
+ * the skill's last-edit time and make a freshly archived skill look ancient.
+ */
+async function archivedSkillRows () {
+  let entries
+  try {
+    entries = await fsP.readdir(util.archiveDir(), { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const usage = await usageMod.loadUsage()
+  const rows = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const dir = path.join(util.archiveDir(), entry.name)
+    const raw = await util.readFileSafe(path.join(dir, 'SKILL.md'))
+    // The record is keyed by the frontmatter name: two archives of the same
+    // skill differ by a `-<stamp>` directory suffix but share one usage record.
+    const name = raw === undefined ? entry.name : (store.nameOf(raw) || entry.name)
+    let stat
+    try {
+      stat = await fsP.stat(dir)
+    } catch {
+      continue
+    }
+    const record = usageMod.getRecord(usage, name)
+    const archivedAt = record !== undefined && typeof record.archived_at === 'string'
+      ? Date.parse(record.archived_at)
+      : Number.NaN
+    rows.push({
+      name,
+      dir,
+      archivedAt: Math.max(Number.isFinite(archivedAt) ? archivedAt : 0, stat.mtimeMs),
+    })
+  }
+  return rows
+}
+
+async function purgeArchived ({ days = 0, dryRun = false, nowMs = Date.now() } = {}) {
+  const ttlDays = Number(days)
+  if (!Number.isFinite(ttlDays) || ttlDays <= 0) {
+    return { ok: false, skipped: 'disabled', error: PURGE_DISABLED_MESSAGE, ttlDays: Number.isFinite(ttlDays) ? ttlDays : 0 }
+  }
+  let present = true
+  try {
+    await fsP.access(util.archiveDir())
+  } catch {
+    present = false
+  }
+  if (!present) return { ok: true, skipped: 'no-archive', ttlDays, dryRun: dryRun === true, candidates: [], purged: [] }
+  const cutoff = nowMs - ttlDays * 86_400_000
+  const candidates = (await archivedSkillRows())
+    .filter((row) => row.archivedAt <= cutoff)
+    .sort((a, b) => a.archivedAt - b.archivedAt)
+  const purged = []
+  if (dryRun !== true) {
+    for (const row of candidates) {
+      // Capture the tree into the ledger before deleting: a mistaken purge is
+      // still recoverable from `.curator_backups/blobs/`, which is why the
+      // ledger exists at all.
+      let before
+      try {
+        before = await store.captureBefore({ name: row.name, dir: row.dir }, true)
+      } catch {
+        before = undefined
+      }
+      try {
+        await fsP.rm(row.dir, { recursive: true, force: true })
+      } catch (error) {
+        return { ok: false, ttlDays, purged, error: `failed to purge '${row.name}': ${error.message}` }
+      }
+      await store.ledgerAppend({
+        action: 'purge',
+        skill: row.name,
+        dir: row.dir,
+        before: before === undefined ? null : before,
+        after: null,
+        actor: 'user',
+        evidence: { ttl_days: ttlDays },
+      })
+      purged.push(row.name)
+    }
+  }
+  return {
+    ok: true,
+    ttlDays,
+    dryRun: dryRun === true,
+    candidates: candidates.map((row) => row.name),
+    purged,
+  }
+}
+
 module.exports = {
   ARCHIVE_DIR: util.archiveDir,
   loadState,
@@ -532,5 +638,8 @@ module.exports = {
   setPaused,
   archiveSkillDir,
   collectToolDeletes,
+  purgeArchived,
+  archivedSkillRows,
+  PURGE_DISABLED_MESSAGE,
   CURATOR_LOCK_STALE_SECONDS,
 }

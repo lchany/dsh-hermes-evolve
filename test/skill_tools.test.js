@@ -156,3 +156,55 @@ test('includeMemory=false removes the memory tool from the fork surface', () => 
   const names = buildToolSet({ includeMemory: false }).map((tool) => tool.name)
   assert.deepEqual(names, ['skills_list', 'skill_view', 'skill_manage'])
 })
+
+test('approval mode stages a replayable skill batch instead of refusing', async () => {
+  await withHome(async (home) => {
+    const tools = buildToolSet({ writeApproval: true, agentCreated: true })
+    const manage = tools.find((tool) => tool.name === 'skill_manage')
+    const staged = JSON.parse(await manage.execute({
+      operations: [{ action: 'create', name: 'pdf-toolkit', content: SKILL_MD }],
+    }, { signal: undefined }))
+
+    assert.equal(staged.success, true, JSON.stringify(staged))
+    assert.equal(staged.staged, true)
+    assert.match(staged.message, /^Staged for approval \(skills\.write_approval is on\)\. Not yet saved — review in the hermes-evolve panel/)
+    // Hermes' `skill_gist`: frontmatter description plus a size bucket.
+    assert.match(staged.gist, /^create 'pdf-toolkit' — Extract text and tables from PDF files without losing layout\. \(\d+ chars\)$/)
+    // Staging never applies.
+    assert.equal(await exists(join(home, 'skills', 'pdf-toolkit', 'SKILL.md')), false)
+
+    const pending = await store.listPending()
+    assert.equal(pending.length, 1)
+    assert.equal(pending[0].kind, 'skill')
+    assert.equal(pending[0].agentCreated, true)
+    assert.deepEqual(pending[0].operations, [{ action: 'create', name: 'pdf-toolkit', content: SKILL_MD }])
+
+    // The panel replays the same payload through the direct-write machinery.
+    const { applyStagedSkillOperations } = require('../src/skill_tools')
+    const applied = await applyStagedSkillOperations(pending[0].operations, { agentCreated: pending[0].agentCreated })
+    assert.equal(applied.ok, true, JSON.stringify(applied))
+    assert.equal(applied.applied, 1)
+    assert.equal(await exists(join(home, 'skills', 'pdf-toolkit', 'SKILL.md')), true)
+
+    // Provenance crossed the approval boundary: still curator-managed.
+    const usageMod = require('../src/skill_usage')
+    const usage = await usageMod.loadUsage()
+    assert.equal(usage['pdf-toolkit'].created_by, 'agent')
+  })
+})
+
+test('approval mode stages memory writes through the pending store', async () => {
+  await withHome(async (home) => {
+    const tools = buildToolSet({ writeApproval: true })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const staged = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'add', content: 'A durable fact.' }, { signal: undefined }))
+    assert.equal(staged.success, true, JSON.stringify(staged))
+    assert.equal(staged.staged, true)
+    assert.match(staged.message, /^Staged for approval \(memory\.write_approval is on\)\. Not yet saved/)
+    assert.equal(await exists(join(home, 'memories', 'MEMORY.md')), false, 'staging must not write')
+    const pending = await store.listPending()
+    assert.equal(pending[0].kind, 'memory')
+    assert.equal(pending[0].target, 'memory')
+    assert.equal(pending[0].actor, 'write-approval')
+  })
+})

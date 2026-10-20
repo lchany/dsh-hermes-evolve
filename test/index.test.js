@@ -10,6 +10,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 
 const plugin = require('../src/index')
+const review = require('../src/review')
 const { withHome } = require('./helpers')
 
 function fakeContext (overrides = {}) {
@@ -101,6 +102,85 @@ test('apply() wires prompts, tools, session subscription and the panel', async (
     // Prompt text is produced lazily and stays bounded.
     const guidance = sections.find((section) => section.name === 'hermes-evolve:memory-guidance')
     assert.ok(guidance.text().length < 2000)
+  })
+})
+
+test('the review dispatch whitelist denies every non-review tool', async () => {
+  await withHome(async () => {
+    const { ctx, listeners } = fakeContext()
+    plugin.apply(ctx, { curatorEnabled: false })
+    const got = listeners.get('tools/pre-execute') || []
+    assert.equal(got.length, 1, 'apply() must install one dispatch gate')
+    const gate = got[0]
+    const next = async () => ({ kind: 'allow' })
+
+    // Not a review fork: the gate is transparent.
+    assert.deepEqual(await gate({ name: 'bash', agent: { session: { id: 'session-1' } } }, next), { kind: 'allow' })
+    assert.deepEqual(await gate({ name: 'bash' }, next), { kind: 'allow' })
+    assert.deepEqual(await gate(undefined, next), { kind: 'allow' })
+
+    const inReview = { name: '', agent: { session: { id: 'hermes-evolve-review-test' } } }
+    review.__reviewSessions.set('hermes-evolve-review-test', { memory: false })
+    try {
+      // Hermes' exact sentence, with this runtime's read tools.
+      const denied = await gate({ ...inReview, name: 'bash' }, next)
+      assert.equal(denied.kind, 'deny')
+      assert.equal(
+        denied.reason,
+        "Background review denied non-whitelisted tool: bash. Allowed here: skill_view/skills_list/read/glob/grep to read, skill_manage(action='patch'|...) to change skills. Do not retry bash.",
+      )
+
+      // The whitelisted surface still runs.
+      for (const name of ['skills_list', 'skill_view', 'skill_manage', 'read', 'glob', 'grep']) {
+        assert.deepEqual(await gate({ ...inReview, name }, next), { kind: 'allow' }, name)
+      }
+      // `memory` is out of scope unless this review pass enabled it.
+      assert.equal((await gate({ ...inReview, name: 'memory' }, next)).kind, 'deny')
+
+      review.__reviewSessions.set('hermes-evolve-review-test', { memory: true })
+      assert.deepEqual(await gate({ ...inReview, name: 'memory' }, next), { kind: 'allow' })
+      const withMemory = await gate({ ...inReview, name: 'bash' }, next)
+      assert.equal(
+        withMemory.reason,
+        "Background review denied non-whitelisted tool: bash. Allowed here: skill_view/skills_list/read/glob/grep to read, skill_manage(action='patch'|...) to change skills and memory for notes (add only). Do not retry bash.",
+      )
+    } finally {
+      review.__reviewSessions.delete('hermes-evolve-review-test')
+    }
+
+    // Once the pass is over, the session is ordinary again.
+    assert.deepEqual(await gate({ ...inReview, name: 'bash' }, next), { kind: 'allow' })
+  })
+})
+
+test('the curator session-start hook mirrors Hermes idle gating (D7)', async () => {
+  const { curatorSessionStartIdle } = plugin.__internals
+  const on = { enabled: true, curatorEnabled: true }
+  const idle = { status: 'idle', session: { id: 'session-1' } }
+
+  // `startup` is the CLI boot thread (`idle_for_seconds=inf`); `resume` keeps
+  // the idle the host measured, so the min-idle gate still applies.
+  assert.deepEqual(curatorSessionStartIdle({ source: 'startup', agent: idle }, on), { idleHours: Number.POSITIVE_INFINITY })
+  assert.deepEqual(curatorSessionStartIdle({ source: 'resume', agent: idle }, on), {})
+  // Only a session start counts.
+  assert.equal(curatorSessionStartIdle({ source: 'clear', agent: idle }, on), undefined)
+  assert.equal(curatorSessionStartIdle({ source: 'compact', agent: idle }, on), undefined)
+  // Our own review/curator forks share the prefix and must never re-trigger.
+  assert.equal(curatorSessionStartIdle({ source: 'startup', agent: { status: 'idle', session: { id: 'hermes-evolve-review-abc' } } }, on), undefined)
+  assert.equal(curatorSessionStartIdle({ source: 'startup', agent: { status: 'idle', session: { id: 'hermes-evolve-curator-abc' } } }, on), undefined)
+  // A busy agent means the process is not idle.
+  assert.equal(curatorSessionStartIdle({ source: 'startup', agent: { status: 'running', session: { id: 'session-1' } } }, on), undefined)
+  // Both switches gate the hook.
+  assert.equal(curatorSessionStartIdle({ source: 'startup', agent: idle }, { enabled: false, curatorEnabled: true }), undefined)
+  assert.equal(curatorSessionStartIdle({ source: 'startup', agent: idle }, { enabled: true, curatorEnabled: false }), undefined)
+  assert.equal(curatorSessionStartIdle(undefined, on), undefined)
+})
+
+test('apply() subscribes the curator session-start hook (D7)', async () => {
+  await withHome(async () => {
+    const { ctx, listeners } = fakeContext()
+    plugin.apply(ctx, { curatorEnabled: false })
+    assert.equal((listeners.get('agent/created') || []).length, 1, 'exactly one session-start listener')
   })
 })
 

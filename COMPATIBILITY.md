@@ -89,13 +89,13 @@
 | D1 | Python → Node.js；同步文件 IO 改为 async | 宿主是 Node 插件，没有 Python 运行时 |
 | D2 | 不重放 `conversation_history`：把 transcript 内联进**同一条 user message**，prompt 放在其后 | DSH 的 session 事件携带 provider stream record，重放等于伪造事件；hermes 的「prompt 作为 user message、系统提示不动」这一点保持一致 |
 | D3 | 工具名映射：`read_file`→`read`，`search_files`→`glob`/`grep` | DSH 的等价工具叫这两个名字 |
-| D4 | 白名单在 **advertised 工具面**上收窄（`tools.restrict`），而不是 dispatch 侧拒绝 | DSH 的 `restrict` 只能过滤继承来的全局层；副作用是模型看不到 hermes 那句 deny 串。收窄本身满足 hermes 的目的（省迭代、保 cache parity） |
+| D4 | 白名单**既**在 advertised 面上收窄（`tools.restrict`）**又**在 dispatch 侧拒绝：插件注册 `tools/pre-execute` waterfall，对 `hermes-evolve-review-*` 会话按白名单拦截，返回 Hermes 的 deny 串（`Background review denied non-whitelisted tool: …`，两种 memory 变体） | DSH 的 `restrict` 只过滤继承来的全局层；dispatch 拒绝与 Hermes 的 `set_thread_tool_whitelist` 等价，且能拦住模型凭旧 transcript 发起的调用。**残留**：串里的读工具名按 D3 映射为 `read/glob/grep`（Hermes 原文 `read_file/search_files`） |
 | D5 | 记忆 `replace`/`remove` 在无人值守时落到 `pending/*.json`，面板批准才真正写入 | hermes 有 `/memory pending` CLI；DSH 没有命令面，用面板等价物代替，语义（不静默删除）一致 |
-| D6 | `skills.write_approval`（approval 模式）只拒绝写入并要求模型文字描述，不 stage 完整补丁 | 工具层没有「带 diff 的可重放补丁」载体；这是**能力退化**，已写进 README 的不变量说明 |
-| D7 | curator 调度用宿主级定时器 + `turn/end` 活动时间 + `curatorMinIdleHours` | hermes 挂在 session-start idle hook 上并感知 gateway/web_server；DSH 插件没有同等 hook，语义（首次播种、按间隔、空闲才跑）保持一致 |
+| D6 | `skills.write_approval`（approval 模式）不再拒绝：`skill_manage` 把完整可重放补丁（action/name、`old_string`/`new_string` 或全文、category、description 摘要）写入 pending（`kind:'skill'`），返回 `Staged for approval (skills.write_approval is on). Not yet saved — …`，不落盘；面板 `POST /pending` 批准后用与直接写入同一套 `applyOperation`/`rollbackTouched` 回放（保留 `agentCreated` 来源与 linter/ledger 设置），回放失败时记录留在 pending 并回显 `failed_op`。记忆写入同样改为 pending（`kind:'memory'`）而非拒绝 | pending 存储是 DSH 里最接近 `/skills pending` 的可重放载体；语义与 Hermes 的 `stage_write`/`apply_skill_pending` 一致。**残留**：没有 `/skills pending` 命令面，只有面板 |
+| D7 | curator 调度：宿主级定时器 + `turn/end` 活动时间 + `curatorMinIdleHours`，**另加** `agent/created`（`source` 为 `startup`/`resume` 且 agent 为 idle、且不是本插件的 fork）的 session-start 检查；`startup` 视作无限空闲，对应 hermes CLI startup 线程的 `maybe_run_curator(idle_for_seconds=float('inf'))`，`resume` 沿用实测空闲 | 语义（首次播种、按间隔、空闲才跑）与 hermes 一致。**残留**：没有 gateway/web_server 的会话空闲计量，`resume` 只能用进程内空闲近似 |
 | D8 | 没有 bundled / hub / external / cron 引用等技能来源 | DSH 的技能只有 `$DSH_HOME/skills` 里的文件；`created_by` 只可能是 `agent`（无人值守写入）或 `learn`（用户前台写入），跳过规则保留但不会触发 |
-| D9 | 备份没有 `manifest.json` 校验和与 ledger-entry rollback | 简化实现：`tar -tzf` 校验绝对路径/`..` 后再解包；账本仍然记账（`skill_store.js` 的 `ledgerAppend`） |
-| D10 | curator CLI（`status`/`run`/`pin`/`rollback`/`purge`/…）未移植 | 面板 `/hermes-evolve` 与 `/hermes-evolve/api` 提供等价操作（run/pause/resume/restore/settings） |
+| D9 | 备份带 `manifest.json` 完整性清单（每个文件相对路径/字节数/sha256，外加 archive 自身的 sha256/字节数）；`restoreBackup` 先校验 archive 摘要与大小，在临时目录逐文件校验大小与 sha256、拒绝清单外的成员，全部通过才解包；旧清单（无 `entries`）回退到 `tar -tzf` 的绝对路径/`..` 校验 | **残留**：hermes 的 ledger-entry rollback API 未移植（账本仍记 `rollback` 事件）；逐文件清单是 port 增强，upstream 的 manifest 只记 `archive_bytes` |
+| D10 | curator CLI 未逐条移植，但面板 `/hermes-evolve/api` 覆盖 status/run/pause/resume/restore/settings 以及 **pin/unpin/purge**：pin 复用 CLI 的 not-agent/not-eligible/unmanaged 文案，purge 支持 `curator.archive_ttl_days` 的 0 禁用语义、dry-run 与逐项 `captureBefore` + ledger；页面有点位按钮 | **残留**：`adopt`、`rollback <backup>`、`report` 的文本输出仍无对应 UI |
 | D11 | 复盘结果以一行 plugin notice 写回源会话 | hermes 打印到 CLI；DSH 里用户只能从会话里看到结果 |
 | D12 | 不注入语言指令 | hermes 没有语言指令；早期版本照抄了 `@weibaohui/hermes-loop` 的做法，已删除 |
 
@@ -103,7 +103,7 @@
 
 - 技能来源模型：`bundled` / `hub` / `external`、`curator.prune_builtins`、`skills.disabled`
 - cron 任务引用技能（事实 pin）与 `cron_rewrites`
-- `hermes curator` 全部子命令、`/skills pending`、`/memory pending` 命令面
+- `hermes curator` 的部分子命令（`adopt`/`rollback`/`report`）与 `/skills pending`、`/memory pending` 命令面
 - `/skills` 斜杠命令注入（DSH 用 `skill` 工具加载）
 - ACP / 网关 / 多平台会话（hermes 的 `platform=` 分支）
 - `oneshot` 模式下的教练语隐藏与 `skill_manage` 隐藏（DSH 没有等价的单次查询模式开关）
@@ -118,6 +118,6 @@ python3 scripts/extract_schemas.py /path/to/hermes-agent   # schemas
 # 2) 物品完整性 + schema 逐字节一致 + 导出面
 npm run check
 
-# 3) 行为测试（49 个）
+# 3) 行为测试（68 个）
 npm test
 ```

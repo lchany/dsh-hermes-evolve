@@ -76,9 +76,130 @@ function toolContext (overrides = {}) {
   }
 }
 
-const APPROVAL_REFUSAL =
-  'Approval mode is on: writes from this background pass are not applied. ' +
-  'Describe the exact change (target, old text, new text, and why) in your final reply instead — a human reviews it before anything is saved.'
+// ── approval mode (D6) ─────────────────────────────────────────────────────
+//
+// Hermes does not refuse a gated write: `evaluate_gate` returns `stage=True`,
+// `_run_write_gate` persists a complete, replayable payload, and the tool
+// answers `{success:true, staged:true, pending_id, gist, message}`
+// (tools/skill_manager_tool.py:652-700, tools/write_approval.py:_staged).
+// The human then approves from the pending surface and the replay goes through
+// the same handler. Refusing outright was a capability regression: the review
+// could describe a change but never deliver one. The functions below restore
+// Hermes' staging semantics on top of our pending store.
+
+/** Where a human reviews a staged write. */
+const STAGED_WHERE = 'review in the hermes-evolve panel (/hermes-evolve → Pending review)'
+
+/** Answer for a write that was staged instead of applied. */
+function stagedApprovalEnvelope (row, subsystem) {
+  return json({
+    success: true,
+    done: true,
+    staged: true,
+    proposal_staged: true,
+    pending_id: row.id,
+    message: `Staged for approval (${subsystem}.write_approval is on). Not yet saved — ${STAGED_WHERE}.`,
+  })
+}
+
+/** `_frontmatter_description` from tools/write_approval.py (<=140 chars). */
+function frontmatterDescription (content) {
+  const match = /^description:\s*(.+)$/m.exec(String(content || ''))
+  if (match === null) return ''
+  return match[1].trim().replace(/^['"]|['"]$/g, '').slice(0, 140)
+}
+
+/** Hermes' `skill_gist`: a one-line, model-free summary of a staged write. */
+function skillGist (op) {
+  if (op === null || typeof op !== 'object') return 'unknown operation'
+  const action = String(op.action || '')
+  const name = String(op.name || '')
+  const content = typeof op.content === 'string' ? op.content : ''
+  if ((action === 'create' || action === 'edit') && content !== '') {
+    const desc = frontmatterDescription(content)
+    const size = content.length >= 1024 ? `${Math.floor(content.length / 1024) + 1} KB` : `${content.length} chars`
+    return `${action === 'create' ? 'create' : 'rewrite'} '${name}'${desc === '' ? '' : ` — ${desc}`} (${size})`
+  }
+  if (action === 'patch') {
+    const oldString = typeof op.old_string === 'string' ? op.old_string : ''
+    const newString = typeof op.new_string === 'string' ? op.new_string : ''
+    const removed = oldString === '' ? 0 : oldString.split('\n').length
+    const added = newString === '' ? 0 : newString.split('\n').length
+    const filePath = typeof op.file_path === 'string' && op.file_path !== '' ? op.file_path : 'SKILL.md'
+    return `patch '${name}' ${filePath} (+${added}/-${removed} lines)`
+  }
+  const templates = {
+    write_file: `write {file_path} in '{name}'`,
+    remove_file: `remove {file_path} from '{name}'`,
+    delete: "delete skill '{name}'",
+  }
+  const template = templates[action] || "{action} '{name}'"
+  return template.replace('{action}', action).replace('{name}', name)
+    .replace('{file_path}', typeof op.file_path === 'string' ? op.file_path : '')
+}
+
+/**
+ * Persist a skill batch for human approval. Every op is kept verbatim so the
+ * panel can replay it through `applyOperation` — the same code path a direct
+ * write takes — instead of re-deriving a diff.
+ */
+async function stageSkillOperations (ops, ctx) {
+  const gist = ops.length === 1
+    ? skillGist(ops[0])
+    : `${ops.length} skill operations: ${ops.map(skillGist).join('; ')}`
+  let row
+  try {
+    row = await store.stagePending({
+      kind: 'skill',
+      operations: ops,
+      gist,
+      // Provenance crosses the approval boundary: a skill the review created is
+      // still agent-created (and curator-managed) when it is finally written.
+      agentCreated: ctx.agentCreated === true,
+      actor: ctx.actor || (ctx.agentCreated === true ? 'background-review' : 'write-approval'),
+    })
+  } catch (error) {
+    return fail(`Could not stage the change for approval: ${error && error.message ? error.message : error}`)
+  }
+  if (!row || row.id === undefined) return fail('Could not stage the change for approval.')
+  return json({
+    success: true,
+    staged: true,
+    pending_id: row.id,
+    gist,
+    message: `Staged for approval (skills.write_approval is on). Not yet saved — ${STAGED_WHERE}.`,
+  })
+}
+
+/**
+ * Replay an approved skill batch. The human already read the payload, so the
+ * read-before-write guard is off; everything else (validation, limits, atomic
+ * writes, ledger, archive, rollback) is the direct-write machinery.
+ */
+async function applyStagedSkillOperations (operations, overrides = {}) {
+  const ctx = toolContext({
+    requireReadBeforeWrite: false,
+    writeApproval: false,
+    actor: 'panel-approval',
+    ...overrides,
+  })
+  const bag = { touched: new Map(), created: [], lintNotes: [] }
+  const results = []
+  for (const op of Array.isArray(operations) ? operations : []) {
+    const outcome = await applyOperation(op, ctx, bag)
+    if (outcome.ok !== true) {
+      await rollbackTouched(bag.touched, bag.created)
+      return { ok: false, error: outcome.error, failed_op: op && op.action, failed_skill: op && op.name, rolled_back: true }
+    }
+    results.push({ action: outcome.action, name: outcome.name, message: outcome.message })
+  }
+  return {
+    ok: true,
+    applied: results.length,
+    results,
+    ...(bag.lintNotes.length > 0 ? { lint: bag.lintNotes } : {}),
+  }
+}
 
 // ── skills_list ────────────────────────────────────────────────────────────
 
@@ -191,7 +312,9 @@ async function handleSkillManage (args, ctx) {
     const created = []
     const results = []
     const lintNotes = []
-    if (ctx.writeApproval === true) return fail(APPROVAL_REFUSAL)
+    // Hermes stages gated skill writes and replays them on approval; refusing
+    // here would make approval mode a capability regression (D6).
+    if (ctx.writeApproval === true) return stageSkillOperations(ops, ctx)
     for (const op of ops) {
       const outcome = await applyOperation(op, ctx, { touched, created, lintNotes })
       if (outcome.ok !== true) {
@@ -490,7 +613,7 @@ function stagedMemoryEnvelope (row) {
 
 async function handleMemory (args, ctx) {
   try {
-    if (ctx.writeApproval === true) return fail(APPROVAL_REFUSAL)
+    const approval = ctx.writeApproval === true
     const target = args && args.target ? String(args.target) : 'memory'
     if (target !== 'memory' && target !== 'user') {
       return fail(`Invalid memory target '${target}'. Use 'memory' or 'user'.`)
@@ -509,15 +632,23 @@ async function handleMemory (args, ctx) {
         text: typeof op.content === 'string' ? op.content : (typeof op.new_text === 'string' ? op.new_text : ''),
         oldText: typeof op.old_text === 'string' ? op.old_text : '',
       }))
-      if (ctx.unattendedMemory === true && normalized.some((op) => BG_DELETE_ACTIONS.has(op.action))) {
+      // Approval mode stages EVERY batch, as `evaluate_gate` does for a gated
+      // subsystem; an unattended review stages only the destructive ones.
+      if (approval || (ctx.unattendedMemory === true && normalized.some((op) => BG_DELETE_ACTIONS.has(op.action)))) {
         let row
         try {
-          row = await store.stagePending({ kind: 'memory', target, limit, operations: normalized, actor: 'background-review' })
+          row = await store.stagePending({
+            kind: 'memory',
+            target,
+            limit,
+            operations: normalized,
+            actor: approval ? 'write-approval' : 'background-review',
+          })
         } catch (error) {
-          return fail(BG_DELETE_REFUSAL)
+          return fail(approval ? `Could not stage the change for approval: ${error.message}` : BG_DELETE_REFUSAL)
         }
-        if (!row || row.id === undefined) return fail(BG_DELETE_REFUSAL)
-        return stagedMemoryEnvelope(row)
+        if (!row || row.id === undefined) return fail(approval ? 'Could not stage the change for approval.' : BG_DELETE_REFUSAL)
+        return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row)
       }
       const outcome = await memory.writeMemory(memoryDir(), target, normalized, { limit })
       if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
@@ -533,15 +664,21 @@ async function handleMemory (args, ctx) {
     if (action !== 'add' && oldText.trim() === '') {
       return fail(`old_text is required for '${action}': a short unique substring identifying the existing entry.`)
     }
-    if (ctx.unattendedMemory === true && BG_DELETE_ACTIONS.has(action)) {
+    if (approval || (ctx.unattendedMemory === true && BG_DELETE_ACTIONS.has(action))) {
       let row
       try {
-        row = await store.stagePending({ kind: 'memory', target, limit, operations: [{ action, text: content, oldText }], actor: 'background-review' })
+        row = await store.stagePending({
+          kind: 'memory',
+          target,
+          limit,
+          operations: [{ action, text: content, oldText }],
+          actor: approval ? 'write-approval' : 'background-review',
+        })
       } catch (error) {
-        return fail(BG_DELETE_REFUSAL)
+        return fail(approval ? `Could not stage the change for approval: ${error.message}` : BG_DELETE_REFUSAL)
       }
-      if (!row || row.id === undefined) return fail(BG_DELETE_REFUSAL)
-      return stagedMemoryEnvelope(row)
+      if (!row || row.id === undefined) return fail(approval ? 'Could not stage the change for approval.' : BG_DELETE_REFUSAL)
+      return approval ? stagedApprovalEnvelope(row, 'memory') : stagedMemoryEnvelope(row)
     }
     const outcome = await memory.writeMemory(memoryDir(), target, [{ action, text: content, oldText }], { limit })
     if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
@@ -646,5 +783,7 @@ module.exports = {
   handleMemory,
   buildToolSet,
   toolContext,
+  applyStagedSkillOperations,
+  skillGist,
   json,
 }

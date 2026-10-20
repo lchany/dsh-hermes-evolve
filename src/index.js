@@ -289,16 +289,47 @@ function apply (ctx, config = {}) {
   // ── background review ───────────────────────────────────────────────────
   const scheduler = review.createScheduler({ hostCtx: ctx, settings, logger })
 
+  // ── review dispatch whitelist (D4) ──────────────────────────────────────
+  //
+  // Hermes narrows a review fork's tool surface twice: the advertised set and
+  // the dispatch path (`set_thread_tool_whitelist` +
+  // `agent/background_review.py:1153-1170`). The second gate matters here too:
+  // the model can still emit a call for a tool it saw earlier in the parent
+  // transcript, and a tool registered AFTER the fork's `tools.restrict` would
+  // not be covered. Denying with `{kind:'deny'}` shows the model Hermes'
+  // sentence instead of running the tool.
+  ctx.effect(() => {
+    const off = ctx.on('tools/pre-execute', async (exec, next) => {
+      try {
+        const agent = exec !== null && typeof exec === 'object' ? exec.agent : undefined
+        const session = agent !== null && typeof agent === 'object' ? agent.session : undefined
+        const policy = session !== null && typeof session === 'object'
+          ? review.reviewSessionPolicy(session.id)
+          : undefined
+        if (policy !== undefined && !review.reviewToolAllowed(exec.name, policy)) {
+          return { kind: 'deny', reason: review.reviewDenyReason(exec.name, policy) }
+        }
+      } catch { /* a broken listener must never block dispatch */ }
+      return next()
+    })
+    return () => { try { off() } catch { /* gone */ } }
+  }, `${PLUGIN}: review dispatch whitelist`)
+
   // ── curator scheduling ──────────────────────────────────────────────────
   const curatorStatus = { lastActivityAt: Date.now(), lastCheckAt: 0, lastResult: null, running: false }
   const CURATOR_CHECK_INTERVAL_MS = 15 * 60 * 1000
-  const curatorTick = async (trigger) => {
+  const curatorTick = async (trigger, { idleHours: idleOverride } = {}) => {
     if (settings.enabled === false || settings.curatorEnabled === false) return
     if (curatorStatus.running) return
     const now = Date.now()
     if (now - curatorStatus.lastCheckAt < CURATOR_CHECK_INTERVAL_MS) return
     curatorStatus.lastCheckAt = now
-    const idleHours = (now - curatorStatus.lastActivityAt) / 3_600_000
+    // Hermes' startup hook passes `idle_for_seconds=float('inf')`: a process that
+    // has just booted has been idle forever, so the min-idle gate must not hold
+    // the first check back.
+    const idleHours = Number.isFinite(idleOverride)
+      ? idleOverride
+      : (now - curatorStatus.lastActivityAt) / 3_600_000
     if (idleHours < (Number(settings.curatorMinIdleHours) || 0)) return
     curatorStatus.running = true
     try {
@@ -320,6 +351,25 @@ function apply (ctx, config = {}) {
   const seedTimer = setTimeout(() => { void curatorTick('boot') }, 30_000)
   if (typeof seedTimer.unref === 'function') seedTimer.unref()
   ctx.effect(() => () => clearTimeout(seedTimer), `${PLUGIN}: curator seed timer`)
+
+  // ── curator session-start hook (D7) ─────────────────────────────────────
+  //
+  // Hermes checks the curator when a session starts, not only on a timer:
+  // `hermes_cli/cli_tui_runtime_mixin.py:352` calls
+  // `maybe_run_curator(idle_for_seconds=float('inf'))` on its startup thread,
+  // while `hermes_cli/web_server_sessions.py:299` passes a measured idle. The
+  // host timer alone would miss a machine that is only ever used in short
+  // interactive sessions, so mirror the startup hook as well.
+  ctx.effect(() => {
+    const off = ctx.on('agent/created', (payload) => {
+      try {
+        const plan = curatorSessionStartIdle(payload, settings)
+        if (plan === undefined) return
+        void curatorTick('session-start', plan)
+      } catch { /* maintenance must never break session creation */ }
+    })
+    return () => { try { off() } catch { /* gone */ } }
+  }, `${PLUGIN}: curator session-start hook`)
 
   // ── session events ──────────────────────────────────────────────────────
   ctx.effect(() => {
@@ -374,6 +424,29 @@ function apply (ctx, config = {}) {
   logger.info?.(`[${PLUGIN}] active — mode=${settings.mode} curator=${settings.curatorEnabled ? 'on' : 'off'} skills=${util.skillsDir()}`)
 }
 
+/**
+ * Hermes runs `maybe_run_curator` from the session-start path. Two shapes exist
+ * upstream (`hermes_cli/cli_tui_runtime_mixin.py:352` uses
+ * `idle_for_seconds=float('inf')`, the web server passes a measured idle), so
+ * `startup` means fully idle and `resume` keeps the measured idle. Returns the
+ * `curatorTick` options, or undefined when this creation is not a user session
+ * start. Our own forks share the `hermes-evolve-` prefix and are skipped.
+ */
+function curatorSessionStartIdle (payload, settings) {
+  if (payload === null || typeof payload !== 'object') return undefined
+  if (settings.enabled === false || settings.curatorEnabled === false) return undefined
+  const source = payload.source
+  if (source !== 'startup' && source !== 'resume') return undefined
+  const agent = payload.agent
+  if (agent === null || typeof agent !== 'object') return undefined
+  const session = agent.session
+  if (session !== null && typeof session === 'object' && typeof session.id === 'string' && session.id.startsWith(`${PLUGIN}-`)) {
+    return undefined
+  }
+  if (agent.status !== 'idle') return undefined
+  return source === 'startup' ? { idleHours: Number.POSITIVE_INFINITY } : {}
+}
+
 function summarizeCuratorResult (result) {
   if (result === null || typeof result !== 'object') return { ok: false }
   if (result.skipped !== undefined) return { skipped: result.skipped }
@@ -397,5 +470,6 @@ module.exports = {
     sanitizeConfig,
     resolveLang,
     summarizeCuratorResult,
+    curatorSessionStartIdle,
   },
 }

@@ -16,6 +16,7 @@ const path = require('node:path')
 const util = require('./util')
 const memory = require('./memory')
 const store = require('./skill_store')
+const skillTools = require('./skill_tools')
 const { DEFAULTS } = require('./const')
 const usageMod = require('./skill_usage')
 
@@ -181,6 +182,49 @@ function registerPanelRoutes (webServerCtx, deps) {
         return
       }
 
+      if (req.method === 'POST' && route === '/skills/pin') {
+        // `hermes curator pin|unpin` (D10). The messages are the CLI's, minus
+        // the `adopt` hint (this port has no adopt command to offer).
+        const body = await readBody(req)
+        const name = String(body.name || '').trim()
+        const pinned = body.pinned === undefined ? true : body.pinned === true || body.pinned === 'true'
+        if (name === '') {
+          sendJson(res, 400, { ok: false, error: 'name is required' })
+          return
+        }
+        const usage = await usageMod.loadUsage()
+        const record = usageMod.backfill(usage[name])
+        if (record.created_by !== 'agent' && record.agent_created !== true) {
+          const reason = pinned
+            ? 'cannot pin (only agent-created skills participate in curation)'
+            : "there's nothing to unpin (curator only tracks agent-created skills)"
+          sendJson(res, 409, { ok: false, error: `curator: '${name}' is bundled or hub-installed — ${reason}.` })
+          return
+        }
+        await usageMod.setPinned(name, pinned)
+        const managed = usageMod.isCuratorManagedRecord(record)
+        const message = pinned
+          ? (managed
+              ? `pinned '${name}' (will bypass auto-transitions)`
+              : `pinned '${name}' (recorded; this skill is unmanaged — auto-transitions never consider it)`)
+          : (managed
+              ? `unpinned '${name}'`
+              : `unpinned '${name}' (recorded; this skill is unmanaged — it was never under auto-transitions to begin with)`)
+        sendJson(res, 200, { ok: true, pinned, managed, message })
+        return
+      }
+
+      if (req.method === 'POST' && route === '/skills/purge') {
+        // `hermes curator purge` (D10): age archives out by TTL. Days <= 0 means
+        // the CLI's "purge disabled" refusal, never "delete everything".
+        const body = await readBody(req)
+        const days = body.days === undefined ? 0 : Number(body.days)
+        const outcome = await curatorModule.purgeArchived({ days, dryRun: body.dryRun === true })
+        logger.info?.(`[hermes-evolve] purge(days=${days}${body.dryRun === true ? ', dry-run' : ''}): ${outcome.ok === true ? `${outcome.purged ? outcome.purged.length : 0} purged` : outcome.error}`)
+        sendJson(res, outcome.ok === true ? 200 : 400, outcome)
+        return
+      }
+
       if (req.method === 'GET' && route === '/pending') {
         sendJson(res, 200, { pending: await store.listPending() })
         return
@@ -189,7 +233,34 @@ function registerPanelRoutes (webServerCtx, deps) {
       if (req.method === 'POST' && route === '/pending') {
         const body = await readBody(req)
         const decision = String(body.decision || 'approved')
-        const outcome = await store.resolvePending(String(body.id || ''), decision)
+        const id = String(body.id || '')
+        // A staged skill batch (approval mode, D6) is replayed BEFORE the
+        // record is resolved. A failed replay means the skill changed since it
+        // was staged; the proposal must stay pending so a human can read the
+        // error and reject it instead of believing a write landed.
+        let staged
+        try {
+          staged = (await store.listPending()).find((row) => row.id === id)
+        } catch {
+          staged = undefined
+        }
+        if (staged !== undefined && decision === 'approved' && staged.kind === 'skill') {
+          const replayed = await skillTools.applyStagedSkillOperations(staged.operations, {
+            agentCreated: staged.agentCreated === true,
+            linterEnabled: settings.linterEnabled !== false,
+            ledgerEnabled: settings.ledgerEnabled !== false,
+            supportFilesEnabled: settings.supportFilesEnabled !== false,
+          })
+          if (replayed.ok !== true) {
+            logger.warn?.(`[hermes-evolve] staged skill replay failed: ${replayed.error}`)
+            sendJson(res, 409, { ok: false, error: replayed.error, failed_op: replayed.failed_op, failed_skill: replayed.failed_skill, record: staged })
+            return
+          }
+          const marked = await store.markPending(id, 'approved', { applied: true, results: replayed.results })
+          sendJson(res, 200, { ok: true, applied: true, result: replayed, record: marked.record })
+          return
+        }
+        const outcome = await store.resolvePending(id, decision)
         if (outcome.ok !== true) {
           sendJson(res, 404, outcome)
           return
@@ -351,6 +422,9 @@ function renderPage () {
       <button class="primary" id="run-dry">Dry run</button>
       <button id="run-pause">Pause</button>
       <button id="run-resume">Resume</button>
+      <label class="field" style="max-width:150px"><span>purge archived older than (days)</span><input id="purge-days" type="number" min="0" value="0"></label>
+      <button id="purge-dry">Purge dry run</button>
+      <button id="purge-run">Purge</button>
     </div>
     <p class="meta" id="curator-last"></p>
   </section>
@@ -434,7 +508,10 @@ async function refreshAll () {
   const [status, skills, mem, pending] = await Promise.all([get('/status'), get('/skills'), get('/memory'), get('/pending')])
   renderStatus(status)
   $('skill-list').innerHTML = skills.skills.length === 0 ? '<li class="empty">no skills yet</li>' :
-    skills.skills.map((k) => '<li><code>' + esc(k.name) + '</code> <span class="pill ' + (k.managed ? 'managed' : '') + '">' + esc(k.state) + (k.managed ? ' · managed' : '') + '</span><br><small>' + esc((k.description || '').slice(0, 160)) + '</small></li>').join('')
+    skills.skills.map((k) => '<li><code>' + esc(k.name) + '</code> <span class="pill ' + (k.managed ? 'managed' : '') + '">' + esc(k.state) + (k.managed ? ' · managed' : '') + (k.pinned ? ' · pinned' : '') + '</span><br><small>' + esc((k.description || '').slice(0, 160)) + '</small> <button data-pin="' + esc(k.name) + '" data-pinned="' + (k.pinned ? 'false' : 'true') + '">' + (k.pinned ? 'unpin' : 'pin') + '</button></li>').join('')
+  document.querySelectorAll('[data-pin]').forEach((b) => b.addEventListener('click', async () => {
+    await post('/skills/pin', { name: b.dataset.pin, pinned: b.dataset.pinned === 'true' }); refreshAll()
+  }))
   $('memory-usage').innerHTML = Object.entries(mem.stores).map(([kind, v]) => '<dt>' + esc(kind) + '</dt><dd>' + v.chars + ' / ' + v.limit + ' chars · ' + v.entries.length + ' entries</dd>').join('')
   $('memory-rendered').textContent = mem.rendered || '(empty)'
 }
@@ -442,6 +519,8 @@ async function refreshAll () {
 $('run-dry').addEventListener('click', async () => { await post('/curator', { action: 'run', dryRun: true }); setTimeout(refreshAll, 800) })
 $('run-pause').addEventListener('click', async () => { await post('/curator', { action: 'pause' }); refreshAll() })
 $('run-resume').addEventListener('click', async () => { await post('/curator', { action: 'resume' }); refreshAll() })
+$('purge-dry').addEventListener('click', async () => { await post('/skills/purge', { days: Number($('purge-days').value) || 0, dryRun: true }); refreshAll() })
+$('purge-run').addEventListener('click', async () => { await post('/skills/purge', { days: Number($('purge-days').value) || 0 }); refreshAll() })
 $('refresh').addEventListener('click', refreshAll)
 refreshAll()
 </script>

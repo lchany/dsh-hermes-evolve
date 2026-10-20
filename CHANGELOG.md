@@ -25,6 +25,32 @@ something you take on trust.
 - Both extractors honour `HERMES_EVOLVE_OUT*` overrides, so audits never write
   into the working tree.
 
+### Fixed
+
+- **D4 — dispatch-side review whitelist.** The plugin now registers a
+  `tools/pre-execute` waterfall and denies any tool outside the review
+  whitelist for `hermes-evolve-review-*` sessions, returning Hermes' exact
+  `Background review denied non-whitelisted tool: …` sentence (both memory
+  variants). `tools.restrict` still narrows the advertised surface.
+- **D6 — approval mode is a real staging flow.** `skill_manage` under
+  `skills.write_approval` stages the complete, replayable patch in the pending
+  store (`kind:'skill'`, Hermes' `skill_gist` summary) instead of refusing;
+  approving in the panel replays it through `applyOperation`/`rollbackTouched`
+  with the original `agentCreated` provenance. Memory writes stage the same way
+  (`kind:'memory'`).
+- **D9 — restore verifies before extracting.** `createBackup` writes a
+  per-file `manifest.json` (path, size, sha256) plus the archive's own digest;
+  `restoreBackup` refuses on a size/checksum mismatch or on an archive member
+  the manifest does not list. Legacy manifests keep the escape-only path.
+- **D10 — panel parity for the curator CLI.** `POST /skills/pin` and
+  `POST /skills/purge` mirror `hermes curator pin/unpin/purge` (including the
+  `curator.archive_ttl_days` disabled message and dry-run), with pin/unpin and
+  purge controls on the panel page.
+- **D7 — curator session-start check.** `agent/created` with `source`
+  `startup`/`resume` on an idle agent now triggers the curator tick, matching
+  Hermes' startup hook (`idle_for_seconds=inf` on startup, a measured idle on
+  resume) in addition to the host timer.
+
 ## [0.1.1] — 2026-10-20
 
 Fidelity pass: every mechanism that had been re-invented was re-derived from

@@ -163,7 +163,7 @@ the ported Hermes semantics always apply inside those passes.
 3. **Read-before-write.** A patch or overwrite must be preceded by a `skill_view` of that exact file in the same review turn. Refusals behave like Hermes: view once, retry once, do not loop.
 4. **No prompt-cache mutation.** Memory is rendered as a per-session frozen snapshot and skills are never reloaded into an existing prompt; everything that enters a running session does so as a message or tool result.
 5. **Corrupt state fails safe.** Unparseable usage records, timestamps, or curator state mean "do nothing", never "archive everything".
-6. **Unattended writes are gated.** Memory `replace`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). In `approval` mode the fork cannot write at all: it describes the intended change instead.
+6. **Unattended writes are gated.** Memory `replace`/`remove` from a background pass are always staged under `pending/` for a human (Hermes #105921 — `add` still lands). In `approval` mode every skill and memory write is staged as a complete, replayable proposal under `pending/`; approving it in the panel replays it through the same write machinery (D6).
 
 ## Development
 

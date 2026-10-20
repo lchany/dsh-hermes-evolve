@@ -18,6 +18,7 @@
  */
 
 const fsP = require('node:fs/promises')
+const { createHash } = require('node:crypto')
 const { join, dirname, relative, sep, isAbsolute, normalize } = require('node:path')
 const { execFile } = require('node:child_process')
 const { promisify } = require('node:util')
@@ -424,11 +425,56 @@ async function captureBefore (skill, completePackage) {
 
 const BACKUP_KEEP = 2
 const TRANSIENT_DIRS = ['node_modules', '.venv', 'venv', '__pycache__', '.git', '.mypy_cache', '.pytest_cache']
+// Everything the archive leaves out. The manifest must describe exactly the
+// files the archive actually carries, or a verified restore is meaningless.
+const BACKUP_EXCLUDES = new Set([
+  '.curator_backups', '.hub', '.locks', '.git', '.archive', '.curator_ledger.jsonl', ...TRANSIENT_DIRS,
+])
+
+/**
+ * Every regular file the archive is expected to contain, as relative path,
+ * byte size and sha256 of its BYTES (not of a utf8 round-trip: support files
+ * may be images or archives, and a lossy decode would make every hash wrong).
+ */
+async function backupFileEntries (root) {
+  const entries = []
+  const walk = async (dir, prefix) => {
+    for (const entry of await listDir(dir)) {
+      if (BACKUP_EXCLUDES.has(entry.name)) continue
+      const rel = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(full, rel)
+      } else if (entry.isFile()) {
+        let buffer
+        try {
+          buffer = await fsP.readFile(full)
+        } catch {
+          continue
+        }
+        entries.push({ path: rel, size: buffer.length, sha256: createHash('sha256').update(buffer).digest('hex') })
+      }
+    }
+  }
+  await walk(root, '')
+  entries.sort((a, b) => a.path.localeCompare(b.path))
+  return entries
+}
+
+function digestOf (buffer) {
+  return createHash('sha256').update(buffer).digest('hex')
+}
 
 /**
  * Snapshot the skills tree with tar. `tar` is used rather than a JS archive
  * writer so the artifact stays a plain `skills.tar.gz` a human can inspect
  * (hermes uses Python's tarfile and the same layout).
+ *
+ * The manifest is the integrity anchor hermes' backup lacks (it records only
+ * `archive_bytes`): a per-file path/size/sha256 list plus the archive's own
+ * digest. `restoreBackup` refuses to extract anything the manifest does not
+ * vouch for, so a truncated or tampered blob cannot silently overwrite a live
+ * skill tree.
  */
 async function createBackup ({ keep = BACKUP_KEEP } = {}) {
   const root = skillsDir()
@@ -440,7 +486,7 @@ async function createBackup ({ keep = BACKUP_KEEP } = {}) {
   const dest = join(base, id)
   await ensureDir(dest)
   const archive = join(dest, 'skills.tar.gz')
-  const excludes = ['.curator_backups', '.hub', '.locks', '.git', '.archive', '.curator_ledger.jsonl', ...TRANSIENT_DIRS]
+  const excludes = [...BACKUP_EXCLUDES]
   const args = ['-czf', archive, '-C', root]
   for (const item of excludes) args.push(`--exclude=${item}`)
   args.push('.')
@@ -450,7 +496,28 @@ async function createBackup ({ keep = BACKUP_KEEP } = {}) {
     await ledgerAppend({ action: 'backup-failed', id, error: String(error && error.message) })
     return undefined
   }
-  const manifest = { id, created_at: isoNow(), keep, files: excludes }
+  let entries = []
+  try {
+    entries = await backupFileEntries(root)
+  } catch { /* a manifest we cannot build is a manifest we must not claim */ }
+  let archiveBytes = -1
+  let archiveSha = undefined
+  try {
+    const buffer = await fsP.readFile(archive)
+    archiveBytes = buffer.length
+    archiveSha = digestOf(buffer)
+  } catch { /* keep the manifest honest: leave the digest unset */ }
+  const manifest = {
+    id,
+    created_at: isoNow(),
+    keep,
+    format: 2,
+    archive: 'skills.tar.gz',
+    ...(archiveSha === undefined ? {} : { archive_bytes: archiveBytes, archive_sha256: archiveSha }),
+    excludes,
+    skill_files: entries.filter((entry) => entry.path === 'SKILL.md' || entry.path.endsWith('/SKILL.md')).length,
+    entries,
+  }
   await atomicWriteJson(join(dest, 'manifest.json'), manifest)
   await pruneBackups(keep, id)
   return { id, path: archive }
@@ -480,11 +547,47 @@ async function pruneBackups (keep, justCreated) {
 }
 
 /** Extract one backup over the skills tree. Refuses absolute/`..` members, because
- *  a tar entry escaping the root is how a restore turns into a data-loss event. */
+ *  a tar entry escaping the root is how a restore turns into a data-loss event.
+ *
+ *  When the manifest carries integrity data (format 2) the archive is verified
+ *  BEFORE anything lands: the archive digest, then every member's size and
+ *  sha256 in a scratch directory, and finally that the archive holds no file
+ *  the manifest does not list. Legacy manifests (no `entries`) fall back to the
+ *  escape check alone. */
 async function restoreBackup (id) {
   const dir = join(backupsDir(), id)
   const archive = join(dir, 'skills.tar.gz')
   if (!(await exists(archive))) return { ok: false, error: `backup '${id}' not found` }
+  let manifest
+  const manifestRaw = await readFileSafe(join(dir, 'manifest.json'))
+  if (manifestRaw !== undefined) {
+    try {
+      manifest = JSON.parse(manifestRaw)
+    } catch {
+      return { ok: false, error: `refusing to restore '${id}': manifest.json is corrupt` }
+    }
+  }
+  let archiveBuffer
+  if (manifest !== null && typeof manifest === 'object' && typeof manifest.archive_sha256 === 'string') {
+    try {
+      archiveBuffer = await fsP.readFile(archive)
+    } catch (error) {
+      return { ok: false, error: `could not read backup: ${error.message}` }
+    }
+    if (Number.isFinite(manifest.archive_bytes) && archiveBuffer.length !== manifest.archive_bytes) {
+      return {
+        ok: false,
+        error: `refusing to restore '${id}': skills.tar.gz size mismatch (manifest ${manifest.archive_bytes} bytes, actual ${archiveBuffer.length} bytes)`,
+      }
+    }
+    const actual = digestOf(archiveBuffer)
+    if (actual !== manifest.archive_sha256) {
+      return {
+        ok: false,
+        error: `refusing to restore '${id}': skills.tar.gz checksum mismatch (manifest ${manifest.archive_sha256}, actual ${actual})`,
+      }
+    }
+  }
   let listing
   try {
     const { stdout } = await execFileP('tar', ['-tzf', archive], { maxBuffer: 64 * 1024 * 1024 })
@@ -497,13 +600,70 @@ async function restoreBackup (id) {
       return { ok: false, error: `refusing to restore: archive member '${member}' escapes the skills root` }
     }
   }
+  const entries = manifest !== null && typeof manifest === 'object' && Array.isArray(manifest.entries) ? manifest.entries : undefined
+  if (entries !== undefined && entries.length > 0) {
+    let verifyDir
+    try {
+      verifyDir = await fsP.mkdtemp(join(dir, '.verify-'))
+    } catch (error) {
+      return { ok: false, error: `could not verify backup: ${error.message}` }
+    }
+    try {
+      try {
+        await execFileP('tar', ['-xzf', archive, '-C', verifyDir], { maxBuffer: 64 * 1024 * 1024 })
+      } catch (error) {
+        return { ok: false, error: `could not verify backup: ${error.message}` }
+      }
+      const problems = []
+      for (const entry of entries) {
+        if (entry === null || typeof entry !== 'object' || typeof entry.path !== 'string') {
+          problems.push('manifest contains a malformed entry')
+          continue
+        }
+        if (isAbsolute(entry.path) || entry.path.split('/').includes('..')) {
+          problems.push(`manifest path '${entry.path}' escapes the skills root`)
+          continue
+        }
+        let buffer
+        try {
+          buffer = await fsP.readFile(join(verifyDir, entry.path))
+        } catch {
+          problems.push(`missing '${entry.path}'`)
+          continue
+        }
+        if (Number.isFinite(entry.size) && buffer.length !== entry.size) {
+          problems.push(`size mismatch for '${entry.path}' (manifest ${entry.size}, actual ${buffer.length})`)
+        }
+        if (typeof entry.sha256 === 'string' && digestOf(buffer) !== entry.sha256) {
+          problems.push(`checksum mismatch for '${entry.path}'`)
+        }
+        if (problems.length >= 5) break
+      }
+      if (problems.length === 0) {
+        const expected = new Set(entries.filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.path === 'string').map((entry) => entry.path))
+        const extra = (await backupFileEntries(verifyDir))
+          .map((entry) => entry.path)
+          .filter((entryPath) => !expected.has(entryPath))
+        if (extra.length > 0) {
+          problems.push(`archive contains files the manifest does not list: ${extra.slice(0, 5).join(', ')}${extra.length > 5 ? ' …' : ''}`)
+        }
+      }
+      if (problems.length > 0) {
+        return { ok: false, error: `refusing to restore '${id}': ${problems.join('; ')}` }
+      }
+    } catch (error) {
+      return { ok: false, error: `could not verify backup: ${error.message}` }
+    } finally {
+      try { await fsP.rm(verifyDir, { recursive: true, force: true }) } catch { /* scratch */ }
+    }
+  }
   try {
     await execFileP('tar', ['-xzf', archive, '-C', skillsDir()], { maxBuffer: 32 * 1024 * 1024 })
   } catch (error) {
     return { ok: false, error: `extract failed: ${error.message}` }
   }
   await ledgerAppend({ action: 'rollback', id })
-  return { ok: true, id, restored: listing.length }
+  return { ok: true, id, restored: listing.length, verified: entries !== undefined && entries.length > 0 }
 }
 
 // ── pending writes (approval mode) ─────────────────────────────────────────
