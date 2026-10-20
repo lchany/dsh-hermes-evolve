@@ -161,7 +161,14 @@ async function approve (subsystem, args, deps) {
         removed.push(...changedEntries(outcome, 'removed').map((text) => `  ${row.id}: ${text}`))
       }
     } else {
-      const outcome = await skillTools.applyStagedSkillOperations(row.operations)
+      const outcome = await skillTools.applyStagedSkillOperations(row.operations, {
+        // Provenance crosses the approval boundary, same as the panel path.
+        agentCreated: row.agentCreated === true,
+        actor: 'command-approval',
+        linterEnabled: deps.settings.linterEnabled !== false,
+        ledgerEnabled: deps.settings.ledgerEnabled !== false,
+        supportFilesEnabled: deps.settings.supportFilesEnabled !== false,
+      })
       ok = outcome.ok === true
       message = outcome.ok === true ? '' : String(outcome.error || 'apply failed')
     }

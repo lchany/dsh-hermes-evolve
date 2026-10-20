@@ -16,6 +16,20 @@ const commands = require('../src/commands')
 const store = require('../src/skill_store')
 const memory = require('../src/memory')
 const learnPrompt = require('../src/learn_prompt')
+const skillUsage = require('../src/skill_usage')
+const { readFile } = require('node:fs/promises')
+
+const SKILL_MD = `---
+name: pdf-toolkit
+description: Extract text and tables from PDF files without losing layout.
+---
+
+# PDF toolkit
+
+## When to Use
+
+When the user hands you a PDF and wants its text.
+`
 
 function makeDeps (overrides = {}) {
   const persisted = []
@@ -216,6 +230,49 @@ test('/skills diff renders the staged edit as a unified diff', async () => {
     assert.match(result.text, /^# Pending skill write .*: edit demo skill/)
     assert.match(result.text, /^\+\+\+ b\/SKILL\.md$/m)
     assert.match(result.text, /^\+new body$/m)
+  })
+})
+
+test('/skills approve replays a staged create and keeps its provenance', async () => {
+  await withHome(async (home) => {
+    const row = await store.stagePending({
+      kind: 'skill',
+      operations: [{ action: 'create', name: 'pdf-toolkit', content: SKILL_MD }],
+      gist: "create 'pdf-toolkit'",
+      agentCreated: true,
+      actor: 'background-review',
+    })
+    const { deps } = makeDeps()
+    const result = await run(deps, 'skills', ` approve ${row.id}`)
+    assert.equal(result.kind, 'success')
+    assert.equal(result.text, 'Approved 1 skills write(s).')
+    assert.match(await readFile(join(home, 'skills', 'pdf-toolkit', 'SKILL.md'), 'utf8'), /# PDF toolkit/)
+    const usage = await skillUsage.loadUsage()
+    assert.equal(usage['pdf-toolkit'].created_by, 'agent')
+    assert.equal((await store.listPending())[0].status, 'approved')
+  })
+})
+
+test('/skills approve all reports the ids it could not land', async () => {
+  await withHome(async () => {
+    const good = await store.stagePending({
+      kind: 'skill',
+      operations: [{ action: 'create', name: 'ok-skill', content: SKILL_MD.replace(/pdf-toolkit/g, 'ok-skill') }],
+      gist: "create 'ok-skill'",
+    })
+    const bad = await store.stagePending({
+      kind: 'skill',
+      // An edit of a skill that no longer exists cannot be replayed.
+      operations: [{ action: 'patch', name: 'gone-skill', file_path: 'SKILL.md', old_string: 'a', new_string: 'b' }],
+      gist: "patch 'gone-skill'",
+    })
+    const { deps } = makeDeps()
+    const result = await run(deps, 'skills', ' approve all')
+    assert.match(result.text, /^Approved 1 skills write\(s\)\./)
+    assert.match(result.text, new RegExp(`Failed:\n {2}${bad.id}: `))
+    const rows = await store.listPending()
+    assert.equal(rows.find((row) => row.id === good.id).status, 'approved')
+    assert.equal(rows.find((row) => row.id === bad.id).status, 'pending')
   })
 })
 
