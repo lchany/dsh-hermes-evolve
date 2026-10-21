@@ -23,6 +23,7 @@ const store = require('./skill_store')
 const skillUsage = require('./skill_usage')
 const skillTools = require('./skill_tools')
 const curator = require('./curator')
+const backfill = require('./backfill')
 
 const SUBSYSTEMS = { skills: 'skill', memory: 'memory' }
 const SKILLS_USAGE = "Usage: /skills approve|reject <id>  (or 'all')"
@@ -616,6 +617,35 @@ async function handleLearnCommand (rawInput, invocation, deps) {
   }
 }
 
+/**
+ * `/backfill` — replay archived sessions through the same review pass.
+ *
+ * `status`/`stop` act on the in-process run; anything else starts one. The start
+ * returns immediately and the run continues in the background, so the chat turn
+ * is never blocked by hours of reviews.
+ */
+async function handleBackfillCommand (rawInput, deps) {
+  const { sub, options } = backfill.parseArgs(rawInput)
+  if (sub === 'status') return backfill.statusText()
+  if (sub === 'stop') {
+    const outcome = backfill.stop()
+    return outcome.stopped === true ? 'Backfill will stop after the current session.' : `Backfill: ${outcome.error}`
+  }
+  const outcome = await backfill.start({
+    hostCtx: deps.hostCtx,
+    settings: deps.settings,
+    logger: deps.logger,
+    runReview: deps.runReview,
+  }, options)
+  if (outcome.started !== true) return `Backfill not started: ${outcome.error}`
+  const scope = [
+    options.limit > 0 ? `limit ${options.limit}` : 'all sessions',
+    options.workspace ? `workspace ${options.workspace}` : 'any workspace',
+    options.consolidate === false ? 'add-only memory' : 'memory consolidation on',
+  ].join(', ')
+  return `Backfill started (${scope}). Poll with /backfill status; stop with /backfill stop.`
+}
+
 // ── registration ───────────────────────────────────────────────────────────
 
 /** The command definitions, in Hermes' order of appearance. */
@@ -660,6 +690,13 @@ function definitions (deps) {
       input: { hint: '[focus]' },
       recordInput: true,
       handler: guard((invocation) => handleRefineCommand(invocation.rawInput, invocation, deps)),
+    },
+    {
+      name: 'backfill',
+      description: 'Replay archived sessions through the review pass to seed memory and skills',
+      input: { hint: '[status|stop] [--limit N] [--workspace W] [--idle-stop K] [--no-consolidate] [--dry-run] [--force]' },
+      recordInput: true,
+      handler: guard(async (invocation) => ({ kind: 'success', text: await handleBackfillCommand(invocation.rawInput, deps) })),
     },
     {
       name: 'learn',

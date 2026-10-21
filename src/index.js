@@ -32,6 +32,7 @@ const prompts = require('./prompts')
 const store = require('./skill_store')
 const skillTools = require('./skill_tools')
 const review = require('./review')
+const backfill = require('./backfill')
 const curator = require('./curator')
 const commands = require('./commands')
 const learnPrompt = require('./learn_prompt')
@@ -448,6 +449,14 @@ function apply (ctx, config = {}) {
         curatorStatus,
         runCuratorNow: (options) => curator.runNow({ hostCtx: ctx, settings, logger, ...options }),
         curatorModule: curator,
+        backfillStatus: () => backfill.readStatus(),
+        runBackfill: (options) => backfill.start({
+          hostCtx: ctx,
+          settings,
+          logger,
+          runReview: review.runReview,
+        }, options),
+        stopBackfill: () => backfill.stop(),
         listTools: () => {
           // `schemas()` is the only view a host-plane plugin gets of the
           // composed global surface: its own tools, every MCP bridge, and other
@@ -483,6 +492,20 @@ function apply (ctx, config = {}) {
     learnPrompt,
     randomId: () => randomUUID(),
   }), `${PLUGIN}: commands`)
+
+  // ── queued backfill ────────────────────────────────────────────────────
+  //
+  // A run prepared before a host restart has no other way to start itself:
+  // plugin code loads once with the host. Consuming the request file here makes
+  // "restart" the only manual step between queuing and the first review.
+  void backfill.resumeRequest({
+    hostCtx: ctx,
+    settings,
+    logger,
+    runReview: review.runReview,
+  }).then((outcome) => {
+    if (outcome && outcome.started === true) logger.info?.(`[${PLUGIN}] queued backfill started`)
+  }).catch((error) => logger.warn?.(`[${PLUGIN}] queued backfill failed: ${error && error.message ? error.message : error}`))
 
   logger.info?.(`[${PLUGIN}] active — approvals(skills/memory)=${settings.skillsWriteApproval ? 'on' : 'off'}/${settings.memoryWriteApproval ? 'on' : 'off'} curator=${settings.curatorEnabled ? 'on' : 'off'} skills=${util.skillsDir()}`)
 }
@@ -526,7 +549,9 @@ function summarizeCuratorResult (result) {
 
 module.exports = {
   name: PLUGIN,
-  inject: ['settings', 'systemPrompt', 'tools', 'agents', 'agentDefaultModel', 'sessions', 'commands'],
+  // `sessionPersistence` lets `/backfill` read archived sessions; it is a core
+  // service, so waiting for it costs nothing at load time.
+  inject: ['settings', 'systemPrompt', 'tools', 'agents', 'agentDefaultModel', 'sessions', 'commands', 'sessionPersistence'],
   Config,
   apply,
   __internals: {

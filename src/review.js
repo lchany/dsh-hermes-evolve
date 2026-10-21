@@ -192,6 +192,10 @@ async function runReview (hostCtx, options) {
     logger,
     focus,
     model,
+    // Backfill only: a user-initiated replay may consolidate an existing entry
+    // instead of only appending, otherwise the memory budgets saturate and the
+    // run stops writing anything. Live reviews never set this.
+    allowMemoryRewrite,
   } = options
   const startedAt = Date.now()
   const transcript = renderTranscript(messages, {
@@ -231,11 +235,11 @@ async function runReview (hostCtx, options) {
       try { hostCtx.emit('hermes-evolve/memory-write', { rows }) } catch { /* no listeners */ }
     },
     // The fork is unattended: memory replace/remove are staged for a human,
-    // never applied silently (hermes #105921).
-    unattendedMemory: true,
+    // never applied silently (hermes #105921). A backfill opts out explicitly.
+    unattendedMemory: allowMemoryRewrite !== true,
     // Approval mode: the fork may read and propose, but a human lands the write.
     writeApproval: settings.skillsWriteApproval === true,
-    memoryApproval: settings.memoryWriteApproval === true,
+    memoryApproval: allowMemoryRewrite === true ? false : settings.memoryWriteApproval === true,
     lang: settings.lang,
   })
 

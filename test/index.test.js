@@ -101,8 +101,9 @@ test('apply() wires prompts, tools, session subscription and the panel', async (
     assert.equal(listeners.has('session/event'), true)
     assert.equal(listeners.has('settings/document-updated'), true)
 
-    // The five Hermes-surface commands are global registrations.
-    assert.deepEqual(commandDefs.map((definition) => definition.name), ['skills', 'memory', 'curator', 'refine', 'learn'])
+    // The Hermes-surface commands are global registrations; `/backfill` is the
+    // DSH-only addition that replays archived sessions through the same review.
+    assert.deepEqual(commandDefs.map((definition) => definition.name), ['skills', 'memory', 'curator', 'refine', 'backfill', 'learn'])
 
     // The web panel is registered through a (possibly deferred) inject.
     assert.ok(injected.some((item) => item.names.includes('webServer')))

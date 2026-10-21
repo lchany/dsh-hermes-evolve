@@ -80,10 +80,10 @@ async function seedMemory (home, entries) {
   assert.equal(outcome.ok, true)
 }
 
-test('the five Hermes-surface commands are registered in order', () => {
+test('the Hermes-surface commands plus /backfill are registered in order', () => {
   const { deps } = makeDeps()
   const names = commands.definitions(deps).map((definition) => definition.name)
-  assert.deepEqual(names, ['skills', 'memory', 'curator', 'refine', 'learn'])
+  assert.deepEqual(names, ['skills', 'memory', 'curator', 'refine', 'backfill', 'learn'])
   for (const definition of commands.definitions(deps)) {
     assert.equal(typeof definition.description, 'string')
     assert.ok(definition.description.length > 0)

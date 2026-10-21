@@ -78,7 +78,7 @@ const EDITABLE_SETTINGS = [
 ]
 
 function registerPanelRoutes (webServerCtx, deps) {
-  const { pluginCtx, settings, settingsNs, logger, refreshMemoryCache, readMemoryText, curatorStatus, runCuratorNow, curatorModule } = deps
+  const { pluginCtx, settings, settingsNs, logger, refreshMemoryCache, readMemoryText, curatorStatus, runCuratorNow, curatorModule, backfillStatus, runBackfill, stopBackfill } = deps
   const webServer = webServerCtx.webServer
   const disposers = []
 
@@ -342,6 +342,23 @@ function registerPanelRoutes (webServerCtx, deps) {
           })
           .finally(() => { curatorStatus.running = false })
         sendJson(res, 202, { ok: true, started: true })
+        return
+      }
+
+      if (req.method === 'GET' && (route === '/backfill' || route === '/backfill/status')) {
+        sendJson(res, 200, await backfillStatus())
+        return
+      }
+
+      if (req.method === 'POST' && route === '/backfill') {
+        const body = await readBody(req)
+        const outcome = await runBackfill(body || {})
+        sendJson(res, outcome.started === true ? 202 : 409, outcome)
+        return
+      }
+
+      if (req.method === 'POST' && route === '/backfill/stop') {
+        sendJson(res, 200, stopBackfill())
         return
       }
 
