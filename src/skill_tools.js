@@ -820,7 +820,7 @@ async function handleMemory (args, ctx) {
       }
       const outcome = await memory.writeMemory(memoryDir(), target, normalized, { limit, batch: true })
       if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
-      return json(outcome.ok ? successEnvelope('batch') : failureEnvelope(outcome, target))
+      return memoryWriteEnvelope(ctx, outcome, target, 'batch')
     }
     if (args && typeof args.action !== 'string') {
       return fail("Missing required parameter: provide 'action' (add/patch/remove) or 'operations' (batch list). Got neither.")
@@ -863,7 +863,7 @@ async function handleMemory (args, ctx) {
     }
     const outcome = await memory.writeMemory(memoryDir(), target, [{ action, text: content, oldText }], { limit, batch: false })
     if (outcome.ok) notifyMemoryWrite(ctx, target, outcome)
-    return json(outcome.ok ? successEnvelope(action) : failureEnvelope(outcome, target))
+    return memoryWriteEnvelope(ctx, outcome, target, action)
   } catch (error) {
     return fail(String(error && error.message ? error.message : error))
   }
@@ -918,6 +918,26 @@ function failureEnvelope (outcome, target) {
   if (outcome.used !== undefined) payload.usage = `${outcome.used}/${outcome.limit}`
   if (outcome.candidates !== undefined) payload.candidates = outcome.candidates
   return payload
+}
+
+/**
+ * hermes `_consolidation_failure` (#42405): a failed consolidation attempt counts
+ * against the turn's cap; past it the tool answers terminally with `done: true` so
+ * the model stops retrying and goes back to the user instead of looping the turn.
+ * Only the reasons the model can retry its way out of are counted (overflow,
+ * zero-match, would-empty) — a bad argument or a threat hit is not a consolidation.
+ */
+function memoryWriteEnvelope (ctx, outcome, target, action) {
+  if (outcome.ok === true) return json(successEnvelope(action))
+  const counter = ctx !== null && typeof ctx === 'object' ? ctx.consolidation : undefined
+  if (memory.CONSOLIDATION_FAILURE_REASONS.has(outcome.reason) &&
+      counter !== undefined && counter !== null && typeof counter.note === 'function') {
+    const state = counter.note()
+    if (state.exhausted === true) {
+      return json({ success: false, done: true, error: memory.retryCapMessage(state.failures) })
+    }
+  }
+  return json(failureEnvelope(outcome, target))
 }
 
 // ── DSH tool definitions ───────────────────────────────────────────────────

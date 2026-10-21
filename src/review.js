@@ -27,6 +27,7 @@
 const { randomUUID } = require('node:crypto')
 
 const store = require('./skill_store')
+const memory = require('./memory')
 const usage = require('./skill_usage')
 const prompts = require('./prompts')
 const { buildToolSet } = require('./skill_tools')
@@ -229,6 +230,9 @@ async function runReview (hostCtx, options) {
     memoryCharLimit: settings.memoryCharLimit,
     userCharLimit: settings.userCharLimit,
     includeMemory: memoryAllowed,
+    // hermes #42405: the fork runs on its own pass, and it is exactly where an
+    // at-capacity write could otherwise retry until the iteration budget dies.
+    consolidation: memory.createRetryCounter(),
     // Same announcement path as the foreground tool: a memory write that lands
     // from the review fork is still a native write an external provider mirrors.
     onMemoryWrite: (rows) => {

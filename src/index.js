@@ -181,11 +181,20 @@ function apply (ctx, config = {}) {
       const stores = []
       if (settings.memoryEnabled !== false) {
         const loaded = await memory.readStore(util.memoryDir(), 'memory')
-        stores.push({ store: 'memory', entries: loaded.entries, limit: Number(settings.memoryCharLimit) || 2200 })
+        const limit = Number(settings.memoryCharLimit) || 2200
+        // hermes memory_tool_store.py:246-252 (#10877): a store an external writer
+        // pushed past its cap used to ride into the prompt silently while every
+        // later add was refused with no visible cause. Warn; never truncate.
+        const notice = memory.overLimitNotice('memory', loaded.entries, limit)
+        if (notice !== null) logger.warn?.(`[${PLUGIN}] ${notice}`)
+        stores.push({ store: 'memory', entries: loaded.entries, limit })
       }
       if (settings.userProfileEnabled !== false) {
         const loaded = await memory.readStore(util.memoryDir(), 'user')
-        stores.push({ store: 'user', entries: loaded.entries, limit: Number(settings.userCharLimit) || 1375 })
+        const limit = Number(settings.userCharLimit) || 1375
+        const notice = memory.overLimitNotice('user', loaded.entries, limit)
+        if (notice !== null) logger.warn?.(`[${PLUGIN}] ${notice}`)
+        stores.push({ store: 'user', entries: loaded.entries, limit })
       }
       memoryText = memory.renderMemoryContext(stores, { lang: settings.lang })
     } catch (error) {
@@ -259,6 +268,24 @@ function apply (ctx, config = {}) {
   // Registered globally so the MAIN agent gets Hermes' native tool surface.
   // Each agent gets its own read-before-write ledger keyed by `exec.agent`.
   const marksByAgent = new WeakMap()
+  // hermes #42405: the store owns one per-turn counter of failed consolidation
+  // attempts and resets it at the turn boundary. One counter per agent session;
+  // `turn/start` (below) resets it, and a fork that never emits turn events just
+  // keeps counting for the length of its single pass.
+  const consolidationBySession = new Map()
+  const consolidationFor = (agent) => {
+    const session = agent !== null && (typeof agent === 'object' || typeof agent === 'function') ? agent.session : undefined
+    const id = session !== null && typeof session === 'object' && typeof session.id === 'string' ? session.id : null
+    if (id === null) return memory.createRetryCounter()
+    let counter = consolidationBySession.get(id)
+    if (counter === undefined) {
+      counter = memory.createRetryCounter()
+      consolidationBySession.set(id, counter)
+      // Sessions are cheap to recreate; bound the map rather than grow forever.
+      if (consolidationBySession.size > 200) consolidationBySession.delete(consolidationBySession.keys().next().value)
+    }
+    return counter
+  }
   const resolveToolContext = (exec) => {
     const agent = exec !== null && typeof exec === 'object' ? exec.agent : undefined
     let marks
@@ -273,6 +300,8 @@ function apply (ctx, config = {}) {
     }
     return skillTools.toolContext({
       marks,
+      // hermes #42405: failures count against this turn's consolidation cap.
+      consolidation: consolidationFor(agent),
       agentCreated: false,
       requireReadBeforeWrite: true,
       linterEnabled: settings.linterEnabled !== false,
@@ -425,6 +454,14 @@ function apply (ctx, config = {}) {
         if (settings.enabled === false) return
         if (event !== null && typeof event === 'object') {
           curatorStatus.lastActivityAt = Date.now()
+          // hermes `turn_context.py:627` resets the store's consolidation-failure
+          // counter at the start of every turn (#42405).
+          if (event.type === 'turn/start') {
+            const counter = session !== null && typeof session === 'object'
+              ? consolidationBySession.get(session.id)
+              : undefined
+            if (counter !== undefined) counter.reset()
+          }
         }
         Promise.resolve(scheduler.onEvent(session, event))
           .then(() => { if (event && event.type === 'turn/end') void curatorTick('turn-end') })

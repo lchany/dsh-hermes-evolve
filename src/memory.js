@@ -420,6 +420,50 @@ function applyOperations (entries, operations, { limit, batch = operations.lengt
   return { ok: true, entries: current, applied, chars: used, limit }
 }
 
+/**
+ * Per-turn cap on failed consolidation attempts (hermes
+ * `memory_tool_store.py:180-219`, #42405). After three failures the tool answers
+ * terminally, so a fragile add cannot loop the turn to budget exhaustion and
+ * suppress the user's reply. Hermes counts overflow and zero-match failures —
+ * the two the model can actually retry its way out of.
+ */
+const MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
+const CONSOLIDATION_FAILURE_REASONS = new Set(['over-limit', 'no-match', 'would-empty'])
+
+/** One counter per turn; the host resets it on `turn/start`. */
+function createRetryCounter () {
+  let failures = 0
+  return {
+    note () {
+      failures += 1
+      return { failures, exhausted: failures > MAX_CONSOLIDATION_FAILURES_PER_TURN }
+    },
+    reset () { failures = 0 },
+    get failures () { return failures }
+  }
+}
+
+/** hermes `_consolidation_failure` terminal wording, unchanged. */
+function retryCapMessage (failures) {
+  return `Memory consolidation failed ${failures} times this turn. Stop retrying memory calls — ` +
+    'leave memory unchanged for now and continue with your reply to the user. ' +
+    'The fact can be saved in a later turn.'
+}
+
+/**
+ * Load-time over-cap notice (hermes `memory_tool_store.py:246-252`, #10877).
+ * External writers can push a store past its limit; Hermes warns and never
+ * truncates, the entries stay loaded, and further additions are blocked until
+ * the store is back under the limit. Returns null when the store fits.
+ */
+function overLimitNotice (store, entries, limit) {
+  const used = charsOf(entries)
+  if (!(Number(limit) > 0) || used <= limit) return null
+  const name = store === 'user' ? 'USER.md' : 'MEMORY.md'
+  return `${name} exceeds its char limit on load: ${used}/${limit} chars. ` +
+    'Entries stay loaded; further additions are blocked until it is back under the limit.'
+}
+
 /** Read one store's entries. Returns { entries, raw, readFailed }. */
 async function readStore (dir, store) {
   const raw = await readFileSafe(storeFile(dir, store))
@@ -493,6 +537,11 @@ module.exports = {
   renderSnapshotEntry,
   applyOne,
   applyOperations,
+  MAX_CONSOLIDATION_FAILURES_PER_TURN,
+  CONSOLIDATION_FAILURE_REASONS,
+  createRetryCounter,
+  retryCapMessage,
+  overLimitNotice,
   readStore,
   writeMemory,
   renderMemoryContext,

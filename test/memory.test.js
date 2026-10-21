@@ -129,3 +129,42 @@ test('MEMORY and USER headers match Hermes', () => {
   assert.equal(memory.HEADERS.memory, 'MEMORY (your personal notes)')
   assert.equal(memory.HEADERS.user, 'USER PROFILE (who the user is)')
 })
+
+test('the consolidation retry cap is three failures, then a terminal answer', () => {
+  const counter = memory.createRetryCounter()
+  assert.equal(counter.note().exhausted, false)
+  assert.equal(counter.note().exhausted, false)
+  assert.equal(counter.note().exhausted, false)
+  const fourth = counter.note()
+  assert.equal(fourth.exhausted, true)
+  assert.equal(fourth.failures, 4)
+  assert.match(memory.retryCapMessage(fourth.failures), /Stop retrying memory calls/)
+  counter.reset()
+  assert.equal(counter.note().exhausted, false)
+})
+
+test('an over-cap store is flagged on load without being truncated', () => {
+  const entries = ['a'.repeat(1400)]
+  assert.match(memory.overLimitNotice('user', entries, 1375), /USER\.md exceeds its char limit on load: 1400\/1375/)
+  assert.equal(memory.overLimitNotice('user', entries, 1400), null)
+})
+
+test('the fourth failed consolidation in one turn answers terminally through the tool', () => {
+  return withHome(async (home) => {
+    const skillTools = require('../src/skill_tools')
+    await memory.writeMemory(memDir(home), 'memory', [{ action: 'add', text: 'x'.repeat(2100) }], { limit: 2200 })
+    const ctx = skillTools.toolContext({ consolidation: memory.createRetryCounter(), memoryCharLimit: 2200 })
+    const replies = []
+    for (let i = 0; i < 4; i++) {
+      replies.push(JSON.parse(await skillTools.handleMemory({ action: 'add', target: 'memory', content: 'y'.repeat(300) }, ctx)))
+    }
+    assert.equal(replies[0].success, false)
+    assert.equal(replies[0].done, undefined)
+    assert.equal(Array.isArray(replies[0].current_entries), true)
+    assert.equal(replies[3].success, false)
+    assert.equal(replies[3].done, true)
+    assert.match(replies[3].error, /Memory consolidation failed 4 times this turn/)
+    // Nothing landed: the store is byte-identical to what the test wrote.
+    assert.deepEqual((await memory.readStore(memDir(home), 'memory')).entries, ['x'.repeat(2100)])
+  })
+})
