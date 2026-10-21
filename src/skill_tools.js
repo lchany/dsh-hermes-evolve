@@ -213,6 +213,14 @@ async function handleSkillsList (args, ctx) {
     let skills = await store.scanSkills()
     skills = skills.map((s) => ({ name: s.name, description: s.description, ...(s.category ? { category: s.category } : {}) }))
     if (category !== undefined) skills = skills.filter((s) => s.category === category)
+    // hermes `_sort_skills`: the listing order is (category, name) everywhere.
+    skills.sort((a, b) => {
+      const ca = a.category || ''
+      const cb = b.category || ''
+      if (ca !== cb) return ca < cb ? -1 : 1
+      if (a.name === b.name) return 0
+      return a.name < b.name ? -1 : 1
+    })
     if (skills.length === 0) {
       return json({ success: true, skills: [], categories: [], message: 'No skills found in skills/ directory.' })
     }
