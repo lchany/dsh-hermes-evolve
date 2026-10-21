@@ -54,7 +54,6 @@ const REVIEW_TOOL_ALLOW = Object.freeze(['skills_list', 'skill_view', 'skill_man
  * session-id test alone) because whether `memory` is in scope is decided per
  * review pass (`review_memory`), exactly like `_review_tool_whitelist`.
  */
-const REVIEW_MIN_SPACING_MS = 30 * 60 * 1000
 const reviewBudgets = new Map()
 const reviewSessions = new Map()
 
@@ -153,11 +152,33 @@ function consumeReviewIteration (sessionId) {
   const budget = reviewBudgets.get(sessionId)
   if (budget === undefined) return null
   budget.used += 1
-  return { used: budget.used, max: budget.max, allowed: budget.used <= budget.max }
+  const maxTokens = Number.isFinite(budget.maxInputTokens) ? budget.maxInputTokens : 0
+  const tokens = Number.isFinite(budget.usedInputTokens) ? budget.usedInputTokens : 0
+  const tokenHit = maxTokens > 0 && tokens >= maxTokens
+  return {
+    used: budget.used,
+    max: budget.max,
+    tokens,
+    maxTokens,
+    tokenHit,
+    allowed: budget.used <= budget.max && !tokenHit,
+  }
 }
 
 function reviewBudgetReason (used, max) {
   return `Background review reached its ${max}-step tool budget (${used} used). `
+    + 'Stop calling tools and answer with what you already have.'
+}
+
+/**
+ * hermes `_review_input_token_budget` (agent/background_review.py:180-212): the
+ * SUM of input tokens across the fork's tool loop is capped at 75% of the review
+ * model's window, never above 600k, with a 120k fallback when the window is
+ * unknown. A host-plane plugin cannot read the fork's window, so the fallback is
+ * the default and `reviewMaxInputTokens` overrides it.
+ */
+function reviewTokenBudgetReason (tokens, maxTokens) {
+  return `Background review reached its ${maxTokens}-token input budget (${tokens} used). `
     + 'Stop calling tools and answer with what you already have.'
 }
 
@@ -232,6 +253,8 @@ async function runReview (hostCtx, options) {
   reviewBudgets.set(sessionId, {
     used: 0,
     max: settings.reviewMaxIterations > 0 ? settings.reviewMaxIterations : 16,
+    usedInputTokens: 0,
+    maxInputTokens: settings.reviewMaxInputTokens > 0 ? settings.reviewMaxInputTokens : 120000,
   })
 
   let handle
@@ -356,8 +379,22 @@ const inFlightSessions = new Set()
 /**
  * Per-session counters. hermes keeps these on the AIAgent instance; a host-plane
  * plugin sees every session's events, so the map is keyed by session id.
+ *
+ * hermes semantics this mirrors (agent/turn_context.py, agent/turn_finalizer.py):
+ * - the memory counter ticks once per human turn and resets the moment it reaches
+ *   its interval (`_tick_memory_nudge:757`) — a turn that later aborts keeps the
+ *   reset, so that trigger is lost rather than retried;
+ * - the skill counter ticks once per model iteration (`turn_iteration_prep.py:167`)
+ *   and resets at the finalizer the moment the threshold is met, before the spawn
+ *   conditions are consulted (`turn_finalizer.py:765-771`);
+ * - `memory` / `skill_manage` tool calls zero the dimension they just wrote
+ *   (`tool_executor.py:746-749`);
+ * - counters are hydrated from persisted history at session start
+ *   (`_hydrate_from_history:753-755`: `prior_user_turns % interval`);
+ * - a pass is refused only while the previous one has not finished
+ *   (`prepare_background_review_run:78-98`); there is no time-based cooldown.
  */
-function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, now = Date.now }) {
+function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, now = Date.now, hasSkillManage }) {
   const doReview = typeof reviewImpl === 'function' ? reviewImpl : runReview
   const sessions = new Map()
   const inFlight = inFlightSessions
@@ -367,19 +404,49 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
     if (state === undefined) {
       state = {
         sessionId,
+        hydrated: false,
         itersSinceSkill: 0,
         turnsSinceMemory: 0,
+        pendingMemory: false,
         lastTurnHadResponse: false,
         lastTurnInterrupted: false,
         lastAssistantText: '',
         lastUserMessage: '',
-        pendingSkill: false,
-        pendingMemory: false,
-        lastReviewAt: 0,
       }
       sessions.set(sessionId, state)
     }
     return state
+  }
+
+  function memoryInterval () {
+    if (settings.memoryEnabled === false) return 0
+    return settings.memoryNudgeInterval > 0 ? settings.memoryNudgeInterval : 0
+  }
+
+  function skillToolAvailable () {
+    if (settings.reviewSkills === false) return false
+    if (typeof hasSkillManage !== 'function') return true
+    try { return hasSkillManage() === true } catch { return false }
+  }
+
+  /** hermes `_hydrate_from_history`: resume the turn counter modulo the interval. */
+  function hydrate (session, state, event) {
+    if (state.hydrated) return
+    state.hydrated = true
+    const interval = memoryInterval()
+    if (interval <= 0) return
+    let prior = 0
+    try {
+      const messages = typeof session.deriveMessages === 'function' ? session.deriveMessages() : []
+      if (Array.isArray(messages)) {
+        prior = messages.filter((m) => m && m.role === 'user' && (!m.source || m.source.kind === 'user')).length
+      }
+    } catch { prior = 0 }
+    // deriveMessages() already contains the message that raised this event.
+    if (event && event.type === 'user/message' && event.data && event.data.source && event.data.source.kind === 'user') {
+      prior -= 1
+    }
+    if (prior > 0) state.turnsSinceMemory = prior % interval
   }
 
   function messageText (message) {
@@ -393,12 +460,21 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
    */
   async function onEvent (session, event) {
     if (event === null || typeof event !== 'object' || settings.enabled === false) return
+    // A fork's own events carry origin 'subagent' and are dropped below, but its
+    // token usage still accrues against the fork's input budget first.
+    if (event.type === 'assistant/message' && session !== null && typeof session === 'object' && reviewBudgets.has(session.id)) {
+      const budget = reviewBudgets.get(session.id)
+      const usage = event.data && event.data.usage
+      if (budget && usage && Number.isFinite(usage.inputTokens)) budget.usedInputTokens += usage.inputTokens
+      return
+    }
     // hermes shuts the loop off inside its own forks (`_memory_nudge_interval =
     // _skill_nudge_interval = 0`, agent/background_review.py:987) and never
-    // spawns a review for a delegated agent (no memory tool, no skill_manage).
-    // one guard covers both: forks and subagents carry origin 'subagent'.
+    // spawns a review for a delegated agent (no memory tool, no skill_manage):
+    // one guard covers both — forks and subagents carry origin 'subagent'.
     if (session !== null && typeof session === 'object' && session.header && session.header.origin === 'subagent') return
     const state = stateOf(session.id)
+    hydrate(session, state, event)
     switch (event.type) {
       case 'step/end': {
         state.itersSinceSkill += 1
@@ -417,7 +493,16 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
         const data = event.data || {}
         const kind = data.source && data.source.kind ? data.source.kind : ''
         if (kind === 'user') {
-          state.turnsSinceMemory += 1
+          const interval = memoryInterval()
+          if (interval > 0) {
+            state.turnsSinceMemory += 1
+            if (state.turnsSinceMemory >= interval) {
+              // hermes clears the counter at the tick, before the turn has any
+              // chance to end well: an aborted turn consumes the trigger.
+              state.turnsSinceMemory = 0
+              state.pendingMemory = true
+            }
+          }
           state.lastUserMessage = messageText(data)
         }
         break
@@ -433,38 +518,28 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
         const reason = event.data && event.data.reason ? event.data.reason.kind : 'completed'
         const interrupted = reason !== 'completed' || state.lastTurnInterrupted
         const skillInterval = settings.skillNudgeInterval > 0 ? settings.skillNudgeInterval : 0
-        const memoryInterval = settings.memoryEnabled !== false && settings.memoryNudgeInterval > 0
-          ? settings.memoryNudgeInterval
-          : 0
-        const fireSkills = skillInterval > 0 && state.itersSinceSkill >= skillInterval
-        const fireMemory = memoryInterval > 0 && state.turnsSinceMemory >= memoryInterval
+        const fireSkills = skillInterval > 0 && skillToolAvailable() && state.itersSinceSkill >= skillInterval
+        // hermes zeroes the skill counter at the finalizer, before it looks at
+        // final_response / interrupted (turn_finalizer.py:765-771).
+        if (fireSkills) state.itersSinceSkill = 0
+        const fireMemory = state.pendingMemory === true
+        state.pendingMemory = false
         const hadResponse = state.lastAssistantText.trim() !== ''
-        const transcript = snapshotMessages(session)
         state.lastAssistantText = ''
         state.lastTurnInterrupted = false
         state.lastUserMessage = ''
         if (interrupted || !hadResponse || (!fireSkills && !fireMemory)) return
-        // hermes detaches a background review but refuses to start another one for
-        // the same conversation inside 1800s (agent/background_review.py:78-98).
-        // Counters are only consumed when a pass actually starts, so a throttled
-        // trigger retries on the next completed turn instead of being lost.
-        if (now() - state.lastReviewAt < REVIEW_MIN_SPACING_MS) {
-          logger?.debug?.('[hermes-evolve] review throttled (started <30m ago); keeping the trigger')
+        // hermes refuses a second run while the previous one is unfinished and
+        // has already spent the counters, so a collision loses the trigger.
+        if (inFlight.has(session.id)) {
+          logger?.debug?.('[hermes-evolve] review already in flight for this session; dropping the trigger')
           return
         }
-        const key = session.id
-        if (inFlight.has(key)) {
-          logger?.debug?.('[hermes-evolve] review already in flight for this session; skipping')
-          return
-        }
-        if (fireSkills) state.itersSinceSkill = 0
-        if (fireMemory) state.turnsSinceMemory = 0
-        state.lastReviewAt = now()
-        inFlight.add(key)
+        inFlight.add(session.id)
         try {
           const result = await doReview(hostCtx, {
             cwd: session.header && session.header.cwd ? session.header.cwd : process.cwd(),
-            messages: transcript,
+            messages: snapshotMessages(session),
             reviewMemory: fireMemory,
             reviewSkills: fireSkills,
             settings,
@@ -474,7 +549,7 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
             appendReviewNotice(session, result, logger)
           }
         } finally {
-          inFlight.delete(key)
+          inFlight.delete(session.id)
         }
         break
       }
@@ -494,7 +569,7 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
 function snapshotMessages (session) {
   try {
     const messages = session.deriveMessages()
-    return Array.isArray(messages) ? messages.slice(-200) : []
+    return Array.isArray(messages) ? messages : []
   } catch {
     return []
   }
@@ -628,11 +703,11 @@ module.exports = {
   REVIEW_TOOL_ALLOW,
   reviewSessionPolicy,
   reviewToolAllowed,
-  REVIEW_MIN_SPACING_MS,
   reviewDenyReason,
   reviewBudget,
   consumeReviewIteration,
   reviewBudgetReason,
+  reviewTokenBudgetReason,
   // Tests drive the in-flight registry directly; production only touches it
   // through runReview().
   __reviewSessions: reviewSessions,

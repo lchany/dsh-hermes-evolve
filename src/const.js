@@ -13,9 +13,6 @@
  *                                        the LLM merge pass is opt-in
  */
 
-const DEFAULT_CORRECTION_WORDS =
-  '不对,错了,重来,别这样,应该是,你弄错了,记住,记忆,wrong,try again,not what i,stop doing'
-
 const DEFAULTS = {
   enabled: true,
   // auto = write directly, approval = stage to pending, log-only = never write
@@ -30,22 +27,16 @@ const DEFAULTS = {
   // ── trigger ──────────────────────────────────────────────────────────────
   skillNudgeInterval: 10,
   memoryNudgeInterval: 10,
-  maxTranscriptChars: 12000,
+  maxTranscriptChars: 120000,
   // hermes agent/background_review.py:_REVIEW_MAX_ITERATIONS — the review fork
   // gets at most this many tool-iteration steps; past it Hermes aborts the run.
   reviewMaxIterations: 16,
-  // hermes caps review input at min(600k, 75% of the window) with a 120k floor.
-  // DSH has no per-request token seam, so the transcript ceiling is expressed in
-  // characters at a conservative 4 chars/token.
-  reviewMaxInputChars: 120000 * 4,
-  maxTranscriptMessages: 40,
+  // hermes caps the SUM of input tokens across the fork at min(600k, 75% of
+  // the window) with a 120k fallback when the window is unknown; the fork's
+  // assistant/message usage feeds the counter. 0 = hermes' fallback.
+  reviewMaxInputTokens: 0,
+  maxTranscriptMessages: 400,
   reviewTimeoutSec: 300,
-
-  // Signals let a cheap, high-recall trigger fire early; precision is the
-  // review agent's negative list's job, not the trigger's.
-  signalTriggerEnabled: true,
-  signalToolFailureMin: 3,
-  signalCorrectionWords: DEFAULT_CORRECTION_WORDS,
 
   // ── memory ───────────────────────────────────────────────────────────────
   memoryInjectionEnabled: true,
@@ -53,7 +44,6 @@ const DEFAULTS = {
   userProfileEnabled: true, // USER.md: who the user is
   memoryCharLimit: 2200,
   userCharLimit: 1375,
-  workspaceMemoryEnabled: true,
 
   // ── in-turn coaching (Hermes' `## Skills` section) ───────────────────────
   coachingEnabled: true,
@@ -117,21 +107,17 @@ function settingsSchema (S) {
 
     skillNudgeInterval: S.number().min(1).default(10).volatile(),
     memoryNudgeInterval: S.number().min(1).default(10).volatile(),
-    maxTranscriptChars: S.number().min(1000).max(480000).default(12000).volatile(),
+    maxTranscriptChars: S.number().min(1000).max(480000).default(120000).volatile(),
     reviewMaxIterations: S.number().min(1).max(64).default(16).volatile(),
-    maxTranscriptMessages: S.number().min(5).max(400).default(40).volatile(),
+    maxTranscriptMessages: S.number().min(5).max(400).default(400).volatile(),
+    reviewMaxInputTokens: S.number().min(0).max(600000).default(0).volatile(),
     reviewTimeoutSec: S.number().min(30).default(300).volatile(),
-
-    signalTriggerEnabled: S.boolean().default(true).volatile(),
-    signalToolFailureMin: S.number().min(0).default(3).volatile(),
-    signalCorrectionWords: S.string().default(DEFAULT_CORRECTION_WORDS).volatile(),
 
     memoryInjectionEnabled: S.boolean().default(true).volatile(),
     memoryEnabled: S.boolean().default(true).volatile(),
     userProfileEnabled: S.boolean().default(true).volatile(),
     memoryCharLimit: S.number().min(200).default(2200).volatile(),
     userCharLimit: S.number().min(200).default(1375).volatile(),
-    workspaceMemoryEnabled: S.boolean().default(true).volatile(),
 
     coachingEnabled: S.boolean().default(true).volatile(),
     coachingMode: S.union(['full', 'patch-only', 'off']).default('full').volatile(),
@@ -158,6 +144,5 @@ function settingsSchema (S) {
 module.exports = {
   DEFAULTS,
   LIMITS,
-  DEFAULT_CORRECTION_WORDS,
   settingsSchema,
 }

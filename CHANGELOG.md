@@ -6,6 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — review trigger parity with hermes v0.22.2
+
+- Removed the invented 30-minute cooldown: hermes only refuses a run while the
+  previous one is unfinished (`prepare_background_review_run`). A colliding
+  trigger is now spent, exactly like hermes, because the counters reset at the
+  tick / finalizer before the spawn conditions are consulted.
+- The memory counter resets when it reaches its interval (hermes
+  `_tick_memory_nudge`), and the skill counter resets at the finalizer even for
+  aborted or empty turns (`turn_finalizer.py:765-771`).
+- Both counters hydrate from persisted history on resume: `prior_user_turns %
+  interval` (`turn_context.py:753-755`).
+- The fork now enforces hermes' aggregate input-token budget (75% of the window,
+  capped at 600k, 120k fallback) by summing `assistant/message.usage.inputTokens`
+  and denying further tool calls past it (`reviewMaxInputTokens`, 0 = fallback).
+- The fork receives the full snapshot: the transcript render budget defaults to
+  120k chars / 400 messages instead of 12k / 40.
+- `memory` / `skill_manage` tool calls zero the matching counter
+  (`tool_executor.py:746-749`), and `origin === 'subagent'` sessions never spawn a
+  review (fork or delegated agent).
+- Dropped dead settings that had no hermes basis: `signalTriggerEnabled`,
+  `signalToolFailureMin`, `signalCorrectionWords`, `reviewMaxInputChars`,
+  `workspaceMemoryEnabled`. `curatorBackupEnabled` is now wired to the
+  pre-consolidation snapshot (`skills.curator.backup.enabled`).
+
 Hermes' Desktop control points, ported as DSH commands; memory moved to the
 current upstream action model; review cost is bounded.
 

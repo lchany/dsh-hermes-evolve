@@ -13,10 +13,7 @@ function fakeSession (id = 'sess-1') {
       id,
       seq: 0,
       header: { cwd: '/tmp/project' },
-      deriveMessages: () => [
-        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'fix the parser bug' }], source: { kind: 'user' } },
-        { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'Fixed it by escaping the delimiter.' }], source: { kind: 'model' } },
-      ],
+      deriveMessages: () => [],
       append: (type, data) => { appended.push({ type, data }) },
     },
   }
@@ -64,7 +61,7 @@ test('a review fires only after the iteration threshold and a completed turn', a
 
 test('a review fork budget denies tool calls past its limit', async () => {
   const id = 'hermes-evolve-review-budget'
-  review.__reviewBudgets.set(id, { used: 0, max: 2 })
+  review.__reviewBudgets.set(id, { used: 0, max: 2, usedInputTokens: 0, maxInputTokens: 100 })
   try {
     assert.equal(review.consumeReviewIteration(id).allowed, true)
     assert.equal(review.consumeReviewIteration(id).allowed, true)
@@ -78,32 +75,87 @@ test('a review fork budget denies tool calls past its limit', async () => {
   }
 })
 
-test('a second review inside 30 minutes is throttled and keeps its trigger', async () => {
+test('a trigger colliding with a running pass is spent, not retried (hermes rule)', async () => {
   let fired = 0
-  let clock = 10_000_000
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
   const { session } = fakeSession()
   const scheduler = review.createScheduler({
     hostCtx: null,
     settings: { ...SETTINGS, skillNudgeInterval: 1, memoryNudgeInterval: 1000 },
     logger: { info: () => {}, debug: () => {} },
-    now: () => clock,
-    runReview: async () => { fired += 1; return { ok: false, skipped: 'test' } },
+    runReview: async () => { fired += 1; await gate; return { ok: false, skipped: 'test' } },
   })
-
   const turn = async () => {
     await scheduler.onEvent(session, event('step/end', {}))
     await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }))
     await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
   }
 
-  await turn()
+  const first = turn()
+  await new Promise((resolve) => setImmediate(resolve))
   assert.equal(fired, 1)
-  clock += 60_000
   await turn()
-  assert.equal(fired, 1, 'throttled inside the 30 minute window')
-  clock += 30 * 60_000
+  assert.equal(fired, 1, 'the second trigger collided with the live pass')
+  release()
+  await first
+  // hermes zeroed the skill counter at the finalizer, so the lost trigger does
+  // not fire later: only a fresh threshold does.
   await turn()
-  assert.equal(fired, 2, 'the kept trigger fires once the window passes')
+  assert.equal(fired, 2)
+})
+
+test('counters are hydrated from persisted history like hermes', async () => {
+  const calls = []
+  const session = {
+    id: 'resumed-1',
+    header: { cwd: '/tmp/project' },
+    deriveMessages: () => [
+      { role: 'user', content: [{ type: 'text', text: 'one' }], source: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'a' }], source: { kind: 'model' } },
+      { role: 'user', content: [{ type: 'text', text: 'two' }], source: { kind: 'user' } },
+      { role: 'assistant', content: [{ type: 'text', text: 'b' }], source: { kind: 'model' } },
+      { role: 'user', content: [{ type: 'text', text: 'three' }], source: { kind: 'user' } },
+      { role: 'user', content: [{ type: 'text', text: 'four — the current turn' }], source: { kind: 'user' } },
+    ],
+    append: () => {},
+  }
+  const scheduler = review.createScheduler({
+    hostCtx: null,
+    settings: { ...SETTINGS, skillNudgeInterval: 1000, memoryNudgeInterval: 2 },
+    logger: { info: () => {}, debug: () => {} },
+    runReview: async (_ctx, options) => { calls.push(options); return { ok: false, skipped: 'test' } },
+  })
+  // Hydration: 4 persisted human turns, current one included → (4-1) % 2 = 1.
+  await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'four — the current turn' }], source: { kind: 'user' } }))
+  await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'ok' }] } }))
+  await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
+  assert.equal(calls.length, 1, 'the hydrated counter reached the interval')
+  assert.equal(calls[0].reviewMemory, true)
+  assert.equal(calls[0].reviewSkills, false)
+})
+
+test('the fork input-token budget denies further tool calls', async () => {
+  const id = 'hermes-evolve-review-tokens'
+  review.__reviewBudgets.set(id, { used: 0, max: 16, usedInputTokens: 0, maxInputTokens: 100 })
+  try {
+    const scheduler = review.createScheduler({
+      hostCtx: null,
+      settings: SETTINGS,
+      logger: { info: () => {}, debug: () => {} },
+    })
+    await scheduler.onEvent({ id, header: { origin: 'subagent' } }, event('assistant/message', {
+      message: { content: [{ type: 'text', text: 'step' }] },
+      usage: { inputTokens: 150, outputTokens: 5 },
+    }))
+    const budget = review.consumeReviewIteration(id)
+    assert.equal(budget.tokenHit, true)
+    assert.equal(budget.allowed, false)
+    assert.equal(budget.tokens, 150)
+    assert.match(review.reviewTokenBudgetReason(budget.tokens, budget.maxTokens), /100-token input budget \(150 used\)/)
+  } finally {
+    review.__reviewBudgets.delete(id)
+  }
 })
 
 test('an interrupted or empty turn never triggers a review', async () => {
@@ -118,6 +170,12 @@ test('an interrupted or empty turn never triggers a review', async () => {
   await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
   await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'aborted', reason: 'user' } }))
   assert.equal(logs.length, 0)
+  // hermes zeroes the skill counter at the finalizer even for an aborted turn:
+  // the next iteration alone must not reach the threshold again.
+  await scheduler.onEvent(session, event('step/end', {}))
+  await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }))
+  await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
+  assert.equal(logs.length, 0, 'the aborted turn consumed the skill trigger')
 })
 
 test('recall blocks and review notices stay out of the review transcript', () => {

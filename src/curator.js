@@ -416,7 +416,7 @@ async function runCurator ({ hostCtx, settings, logger, dryRun = false, consolid
       }
     }
 
-    if (consolidatePass && dryRun !== true) {
+    if (consolidatePass && dryRun !== true && settings.curatorBackupEnabled !== false) {
       const backup = await store.createBackup({ keep: Math.max(1, Number(settings.curatorBackupKeep) || 2) })
       logger?.info?.(`[hermes-evolve] curator backup ${backup && backup.id ? backup.id : '(failed)'}`)
     }

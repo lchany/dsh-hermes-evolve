@@ -147,11 +147,9 @@ Every option is a `.volatile()` schemastery field and can be changed live from t
 | `memoryWriteApproval` | `false` | stage every memory write for approval (hermes `memory.write_approval`) |
 | `skillNudgeInterval` | `10` | tool iterations before a skill review (hermes `agent.skills.creation_nudge_interval`) |
 | `reviewMaxIterations` | `16` | tool-dispatch budget for one review fork (hermes `_REVIEW_MAX_ITERATIONS`); past it calls are denied and the fork must answer |
-
-Background reviews are also throttled to one per session per 30 minutes
-(hermes' 1800s guard): a trigger that hits the window is kept and retried on the
-next completed turn instead of being dropped.
+| `reviewMaxInputTokens` | `0` | aggregate input-token budget for one fork (hermes `_review_input_token_budget`); `0` = the 120k fallback hermes uses while the window is unknown |
 | `memoryNudgeInterval` | `10` | user turns before a memory review (hermes `memory.nudge_interval`) |
+| `maxTranscriptChars` / `maxTranscriptMessages` | `120000` / `400` | render budget for the transcript the fork receives |
 | `reviewTimeoutSec` | `300` | fork timeout |
 | `provider` / `model` | `''` | aux model for the fork; empty = host default |
 | `memoryCharLimit` / `userCharLimit` | `2200` / `1375` | Hermes budgets |
@@ -164,10 +162,19 @@ next completed turn instead of being dropped.
 | `curatorMinIdleHours` | `2` | only run while the GUI is idle |
 | `curatorStaleDays` / `curatorArchiveDays` | `14` / `30` | inactivity thresholds |
 | `curatorConsolidate` | `false` | opt-in LLM umbrella pass |
-| `curatorBackupKeep` | `2` | snapshots to retain |
-| `signalTriggerEnabled` | `true` | accelerate a review after repeated tool failures or correction phrases |
+| `curatorBackupEnabled` / `curatorBackupKeep` | `true` / `2` | pre-consolidation snapshots (hermes `skills.curator.backup`) |
 
-The full list, including `SUSPECTS_TOP_N`, transcript caps and correction words, is in [`src/const.js`](src/const.js).
+Trigger semantics follow hermes exactly: the memory counter ticks once per human
+turn and resets the moment it reaches its interval (`_tick_memory_nudge`); the
+skill counter ticks once per model iteration and resets at the finalizer before
+the spawn conditions are checked (`turn_finalizer.py:765-771`); `memory` /
+`skill_manage` calls zero their own counter; both counters are hydrated from
+persisted history on resume (`prior_user_turns % interval`); and a trigger that
+collides with a live pass is spent, because hermes has already zeroed the
+counter and only refuses the *run* (`prepare_background_review_run`). There is
+no time-based cooldown — hermes has none.
+
+The full list is in [`src/const.js`](src/const.js).
 
 ## Living next to other plugins
 

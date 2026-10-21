@@ -76,8 +76,9 @@
 | memory / user 字符上限 | 2200 / 1375 | `memory_tool_store.py` |
 | skill / memory nudge 间隔 | 10 / 10 | `agent_init.py:1380/1301` |
 | review 迭代上限 | 16（DSH 无 max-steps：由 `tools/pre-execute` 在预算耗尽后拒绝工具调用，让 fork 用已有信息作答） | `background_review.py:173` |
-| review 输入 token 上限 | 未移植（DSH 无请求级 token 计量）；transcript 字符上限 12k 默认、clamp 到 480k 字符（≈120k token），Hermes 是 600k token / 上下文 75% / 兜底 120k | `background_review.py:180-182` |
-| review 最小间隔 | 30 分钟（trigger 保留，顺延到下一个完成回合） | `background_review.py:78-98` |
+| review 输入 token 上限 | 已移植：累计 fork 的 `assistant/message.usage.inputTokens`，超过上限即拒绝后续工具调用；窗口不可见时用 Hermes 的 120k 兜底，`reviewMaxInputTokens` 可覆盖（0 = 兜底） | `background_review.py:180-212` |
+| review 单飞 | 无时间冷却；上一次未结束则丢弃本次 trigger（Hermes 在 tick/finalizer 已清零计数，`prepare_background_review_run` 只拒绝运行） | `background_review.py:78-98`、`turn_finalizer.py:765-771` |
+| 计数恢复 | 会话恢复时 `turnsSinceMemory = prior_user_turns % interval` | `turn_context.py:753-755` |
 | curator 间隔 / 最小空闲 | 7 天 / 2 小时 | `curator.py:31-35` |
 | stale / archive | 14 天 / 30 天 | 同上 |
 | 备份保留 | 2 | `curator_backup.py` |

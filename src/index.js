@@ -313,7 +313,7 @@ function apply (ctx, config = {}) {
   }, `${PLUGIN}: tool registrations`)
 
   // ── background review ───────────────────────────────────────────────────
-  const scheduler = review.createScheduler({ hostCtx: ctx, settings, logger })
+  const scheduler = review.createScheduler({ hostCtx: ctx, settings, logger, hasSkillManage })
 
   // ── review dispatch whitelist (D4) ──────────────────────────────────────
   //
@@ -338,7 +338,12 @@ function apply (ctx, config = {}) {
         if (policy !== undefined) {
           const budget = review.consumeReviewIteration(session.id)
           if (budget !== null && budget.allowed === false) {
-            return { kind: 'deny', reason: review.reviewBudgetReason(budget.used, budget.max) }
+            return {
+              kind: 'deny',
+              reason: budget.tokenHit
+                ? review.reviewTokenBudgetReason(budget.tokens, budget.maxTokens)
+                : review.reviewBudgetReason(budget.used, budget.max),
+            }
           }
         }
       } catch { /* a broken listener must never block dispatch */ }

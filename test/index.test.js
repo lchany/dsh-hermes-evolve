@@ -227,7 +227,7 @@ test('sanitizeConfig drops host-materialised volatile placeholders', () => {
     { model: 'x' },
   )
   // A scalar default only accepts scalars.
-  assert.deepEqual(sanitizeConfig({ signalCorrectionWords: 'a,b' }), { signalCorrectionWords: 'a,b' })
+  assert.deepEqual(sanitizeConfig({ registerTools: 'auto' }), { registerTools: 'auto' })
   assert.deepEqual(sanitizeConfig({ memoryCharLimit: 3000 }), { memoryCharLimit: 3000 })
   assert.deepEqual(sanitizeConfig({ memoryCharLimit: '3000' }), {})
   assert.deepEqual(sanitizeConfig({ unknownKey: 1 }), {})

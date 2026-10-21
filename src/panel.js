@@ -70,7 +70,6 @@ function readBody (req) {
 const EDITABLE_SETTINGS = [
   'enabled', 'memoryWriteApproval', 'skillsWriteApproval', 'provider', 'model',
   'skillNudgeInterval', 'memoryNudgeInterval', 'reviewTimeoutSec',
-  'signalTriggerEnabled', 'signalToolFailureMin',
   'memoryInjectionEnabled', 'memoryEnabled', 'userProfileEnabled',
   'coachingEnabled', 'coachingMode',
   'linterEnabled', 'ledgerEnabled', 'registerTools', 'respectForeignMemory',
@@ -451,7 +450,7 @@ function renderPage () {
 const API = '/hermes-evolve/api'
 const $ = (id) => document.getElementById(id)
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
-const BOOL_FIELDS = ['enabled','signalTriggerEnabled','memoryInjectionEnabled','memoryEnabled','userProfileEnabled','coachingEnabled','linterEnabled','ledgerEnabled','curatorEnabled','curatorConsolidate']
+const BOOL_FIELDS = ['enabled','memoryInjectionEnabled','memoryEnabled','userProfileEnabled','coachingEnabled','linterEnabled','ledgerEnabled','curatorEnabled','curatorConsolidate']
 const NUM_FIELDS = ['skillNudgeInterval','memoryNudgeInterval','reviewTimeoutSec','curatorIntervalHours','curatorMinIdleHours','curatorStaleDays','curatorArchiveDays','curatorBackupKeep']
 
 async function get (path) { const r = await fetch(API + path); return r.json() }
