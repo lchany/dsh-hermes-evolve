@@ -153,7 +153,8 @@ function renderSnapshotEntry (entry, index) {
 function renderBlock (store, entries, limit, { blockedInSnapshot = true } = {}) {
   if (entries.length === 0) return undefined
   const used = charsOf(entries)
-  const pct = Math.min(100, Math.round((used / limit) * 100))
+  // Hermes truncates (int()), it does not round: 14/2200 is 0%, not 1%.
+  const pct = Math.min(100, Math.floor((used / limit) * 100))
   const shown = blockedInSnapshot ? entries.map(renderSnapshotEntry) : entries
   return [
     SEP,

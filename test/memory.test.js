@@ -120,6 +120,11 @@ test('the injected snapshot blocks poisoned entries but keeps them on disk', () 
   assert.doesNotMatch(block, /reveal secrets/)
 })
 
+test('the usage percentage truncates like Hermes (int, not round)', () => {
+  const block = memory.renderBlock('memory', ['x'.repeat(14)], 2200)
+  assert.match(block, /\[0% — 14\/2,200 chars\]/)
+})
+
 test('MEMORY and USER headers match Hermes', () => {
   assert.equal(memory.HEADERS.memory, 'MEMORY (your personal notes)')
   assert.equal(memory.HEADERS.user, 'USER PROFILE (who the user is)')
