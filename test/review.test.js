@@ -148,3 +148,80 @@ test('transcript rendering keeps the newest turns and labels roles', () => {
   assert.doesNotMatch(rendered, /message 0\n/)
   assert.ok(rendered.length <= 2100)
 })
+
+// ── self-improvement recap (hermes `_action_lines`) ──────────────────────
+
+function toolCall (callId, name, args) {
+  return { type: 'tool/call', data: { callId, name, arguments: JSON.stringify(args) } }
+}
+
+function toolResult (callId, payload, isError = false) {
+  return {
+    type: 'tool/result',
+    data: { message: { role: 'tool', toolCallId: callId, isError, content: [{ type: 'text', text: JSON.stringify(payload) }] } },
+  }
+}
+
+test('the recap names what the review actually wrote', () => {
+  const agent = {
+    session: {
+      snapshotEvents: () => [
+        toolCall('c1', 'skill_manage', { operations: [{ action: 'patch', name: 'demo' }] }),
+        toolResult('c1', { success: true, applied: 1, results: [{ action: 'patch', name: 'demo', message: 'Patched skill demo.' }] }),
+        toolCall('c2', 'memory', { target: 'user', operations: [{ action: 'add', content: 'x' }] }),
+        toolResult('c2', { success: true, applied: 1, results: [{ action: 'add' }] }),
+      ],
+    },
+  }
+  assert.deepEqual(review.collectReviewActions(agent, 'zh'), ["技能 'demo' 已修补", '用户画像已更新'])
+  assert.deepEqual(review.collectReviewActions(agent, 'en'), ["Skill 'demo' patched", 'User profile updated'])
+})
+
+test('the recap ignores staged writes, failed calls, and memory targets left alone', () => {
+  const agent = {
+    session: {
+      snapshotEvents: () => [
+        toolCall('c1', 'skill_manage', { operations: [{ action: 'create', name: 'draft' }] }),
+        toolResult('c1', { success: true, staged: true, pending_id: 'p1' }),
+        toolCall('c2', 'memory', { target: 'memory' }),
+        toolResult('c2', { success: true, applied: 1 }, true),
+        toolCall('c3', 'memory', { target: 'memory' }),
+        toolResult('c3', { success: true, staged: true, proposal_staged: true }),
+        toolCall('c4', 'memory', { target: 'memory' }),
+        toolResult('c4', { success: true, applied: 0, results: [] }),
+      ],
+    },
+  }
+  assert.deepEqual(review.collectReviewActions(agent, 'zh'), [])
+})
+
+test('the recap survives a fork that exposes no session events', () => {
+  assert.deepEqual(review.collectReviewActions({ session: { snapshotEvents: () => { throw new Error('gone') } } }, 'zh'), [])
+  assert.deepEqual(review.collectReviewActions({}, 'zh'), [])
+})
+
+test('the notice reports the recap when something landed', () => {
+  const { session, appended } = fakeSession()
+  review.appendReviewNotice(session, {
+    scope: { reviewSkills: true, reviewMemory: true },
+    durationMs: 27000,
+    actions: ["技能 'demo' 已修补", '记忆已更新'],
+    lang: 'zh',
+  })
+  assert.equal(appended.length, 1)
+  assert.equal(appended[0].type, 'user/message')
+  assert.equal(appended[0].data.source.form, 'notice')
+  assert.equal(appended[0].data.source.summary, "💾 自我改进回顾：技能 'demo' 已修补 · 记忆已更新")
+  assert.match(appended[0].data.content[0].text, /自我改进回顾/)
+})
+
+test('a quiet review still leaves the plain completion line', () => {
+  const { session, appended } = fakeSession()
+  review.appendReviewNotice(session, {
+    scope: { reviewSkills: true, reviewMemory: false },
+    durationMs: 3000,
+    actions: [],
+    lang: 'zh',
+  })
+  assert.equal(appended[0].data.source.summary, '背景复盘完成（skills，3s）')
+})

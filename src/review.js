@@ -265,6 +265,7 @@ async function runReview (hostCtx, options) {
     await agent.whenIdle()
     const summary = lastAssistantText(agent)
     const usageStats = sumReviewUsage(agent)
+    const actions = collectReviewActions(agent, settings.lang)
     logger?.info?.(`[hermes-evolve] review finished in ${Date.now() - startedAt}ms (skills=${reviewSkills} memory=${reviewMemory})`)
     return {
       ok: true,
@@ -273,6 +274,8 @@ async function runReview (hostCtx, options) {
       durationMs: Date.now() - startedAt,
       usage: usageStats,
       model: selected,
+      actions,
+      lang: recapLang(settings.lang),
     }
   } catch (error) {
     const reason = error && error.message ? error.message : String(error)
@@ -483,14 +486,109 @@ function snapshotMessages (session) {
   }
 }
 
+// ── self-improvement recap (hermes `_action_lines`) ───────────────────────
+//
+// Hermes publishes what the loop actually changed, built from the fork's
+// SUCCESSFUL tool results rather than from the request (an approval gate or a
+// failed write can leave every requested operation unapplied):
+//
+//     💾 自我改进回顾：技能 'demo' 已修补 · 记忆已更新
+//
+// The per-action strings mirror hermes locales/zh.yaml:3428-3442 and
+// locales/en.yaml:3534-3547; the recap is published only when something landed.
+
+const RECAP_VERBS = {
+  zh: { create: '已创建', patch: '已修补', write_file: '已写入', remove_file: '已移除', delete: '已删除' },
+  en: { create: 'created', patch: 'patched', write_file: 'written', remove_file: 'removed', delete: 'deleted' },
+}
+const RECAP = {
+  zh: { skill: '技能', memory: '记忆', user: '用户画像', updated: '已更新', header: '💾 自我改进回顾：' },
+  en: { skill: 'Skill', memory: 'Memory', user: 'User profile', updated: ' updated', header: '💾 Self-improvement review: ' },
+}
+
+function recapLang (lang) {
+  return typeof lang === 'string' && /^en/i.test(lang.trim()) ? 'en' : 'zh'
+}
+
+/**
+ * Action lines from a finished review fork (empty when nothing was written).
+ * The fork runs with `isSeeded: false`, so its event log only holds this
+ * review's calls — Hermes' #14944 filter for inherited history is not needed.
+ */
+function collectReviewActions (agent, lang) {
+  const l = recapLang(lang)
+  const verbs = RECAP_VERBS[l]
+  const text = RECAP[l]
+  const actions = []
+  const calls = new Map()
+  let events = []
+  try {
+    events = agent.session.snapshotEvents()
+  } catch {
+    return actions
+  }
+  for (const event of events) {
+    if (event === null || typeof event !== 'object' || event.data === null) continue
+    if (event.type === 'tool/call') {
+      calls.set(event.data.callId, { name: event.data.name, arguments: event.data.arguments })
+      continue
+    }
+    if (event.type !== 'tool/result') continue
+    const message = event.data.message
+    if (message === null || typeof message !== 'object' || message.isError === true) continue
+    const call = calls.get(message.toolCallId)
+    if (call === undefined) continue
+    let payload
+    try {
+      payload = JSON.parse(contentToText(message.content))
+    } catch {
+      continue
+    }
+    if (payload === null || typeof payload !== 'object' || payload.success !== true) continue
+    // A staged (approval-gated) write is a pending row, not a change.
+    if (payload.staged === true) continue
+    if (call.name === 'skill_manage') {
+      if (!Array.isArray(payload.results)) continue
+      for (const result of payload.results) {
+        if (result === null || typeof result !== 'object') continue
+        const verb = typeof result.action === 'string' ? verbs[result.action] : undefined
+        if (verb === undefined || typeof result.name !== 'string') continue
+        actions.push(`${text.skill} '${result.name}' ${verb}`)
+      }
+      continue
+    }
+    if (call.name !== 'memory') continue
+    const applied = typeof payload.applied === 'number' ? payload.applied : 0
+    if (applied <= 0) continue
+    let args = {}
+    try {
+      args = typeof call.arguments === 'string' && call.arguments !== '' ? JSON.parse(call.arguments) : {}
+    } catch {
+      args = {}
+    }
+    const target = typeof args.target === 'string' ? args.target : ''
+    actions.push(`${target === 'user' ? text.user : text.memory}${text.updated}`)
+  }
+  return [...new Set(actions)]
+}
+
 /** One-line notice back into the source session, so the user can see what the
  *  loop did without opening a panel. */
 function appendReviewNotice (session, result, logger) {
   try {
+    const lang = recapLang(result.lang)
+    const labels = RECAP[lang]
+    const actions = Array.isArray(result.actions) ? result.actions : []
     const scopes = []
     if (result.scope.reviewSkills) scopes.push('skills')
     if (result.scope.reviewMemory) scopes.push('memory')
-    const summary = `背景复盘完成（${scopes.join(' + ')}，${Math.round(result.durationMs / 1000)}s）`
+    // hermes publishes the recap only when an action landed; keep the plain
+    // completion line otherwise so a quiet review still leaves a trace.
+    const summary = actions.length > 0
+      ? `${labels.header}${actions.join(' · ')}`
+      : lang === 'en'
+        ? `Background review finished (${scopes.join(' + ')}, ${Math.round(result.durationMs / 1000)}s)`
+        : `背景复盘完成（${scopes.join(' + ')}，${Math.round(result.durationMs / 1000)}s）`
     session.append('user/message', {
       content: [{ type: 'text', text: `[hermes-evolve] ${summary}` }],
       source: { kind: 'hermes-evolve', form: 'notice', plugin: 'hermes-evolve', summary },
@@ -506,6 +604,8 @@ module.exports = {
   createScheduler,
   snapshotMessages,
   appendReviewNotice,
+  collectReviewActions,
+  recapLang,
   inFlightSessions,
   contentToText,
   lastAssistantText,

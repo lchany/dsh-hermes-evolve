@@ -100,7 +100,7 @@
 | D8 | 没有 bundled / hub / external / cron 引用等技能来源 | DSH 的技能只有 `$DSH_HOME/skills` 里的文件；`created_by` 只可能是 `agent`（无人值守写入）或 `learn`（用户前台写入），跳过规则保留但不会触发 |
 | D9 | 备份带 `manifest.json` 完整性清单（每个文件相对路径/字节数/sha256，外加 archive 自身的 sha256/字节数）；`restoreBackup` 先校验 archive 摘要与大小，在临时目录逐文件校验大小与 sha256、拒绝清单外的成员，全部通过才解包；旧清单（无 `entries`）回退到 `tar -tzf` 的绝对路径/`..` 校验 | **残留**：hermes 的 ledger-entry rollback API 未移植（账本仍记 `rollback` 事件）；逐文件清单是 port 增强，upstream 的 manifest 只记 `archive_bytes` |
 | D10 | `/curator status|run|pause|resume|pin|unpin|restore|list-archived` 已按 `hermes_cli/curator.py` 的文案移植（`run` 支持 `--dry-run`/`--consolidate`）；仍无 CLI 的 `ledger`/`rollback`/`adopt`/`prune`/`backup`/`archive`/`list-unmanaged`/`purge`。面板 `/hermes-evolve/api` 覆盖 status/run/pause/resume/restore/settings 以及 **pin/unpin/purge**：pin 复用 CLI 的 not-agent/not-eligible/unmanaged 文案，purge 支持 `curator.archive_ttl_days` 的 0 禁用语义、dry-run 与逐项 `captureBefore` + ledger；页面有点位按钮 | **残留**：`adopt`、`rollback <backup>`、`report` 的文本输出仍无对应 UI |
-| D11 | 复盘结果以一行 plugin notice 写回源会话 | hermes 打印到 CLI；DSH 里用户只能从会话里看到结果 |
+| D11 | 复盘结果以一行 plugin notice 写回源会话；有落地动作时按 hermes `_action_lines` 逐项列出（`💾 自我改进回顾：技能 'x' 已修补 · 记忆已更新`，英文 locale 用 `💾 Self-improvement review:`），动作行只取自 fork 里**成功**的工具结果，暂存/失败/未应用的不计；无动作时保留一行完成提示 | hermes 把回顾打印到 CLI/TUI 回调；DSH 没有跨面板的状态行通道，只能写成会话内 notice（`source.kind='hermes-evolve'`, `form:'notice'`） |
 | D12 | 不注入语言指令 | hermes 没有语言指令；早期版本照抄了 `@weibaohui/hermes-loop` 的做法，已删除 |
 
 ## 4. 明确未移植

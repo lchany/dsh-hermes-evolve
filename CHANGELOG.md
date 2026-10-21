@@ -11,6 +11,11 @@ current upstream action model; review cost is bounded.
 
 ### Added
 
+- Review notices carry Hermes' self-improvement recap: the lines are built from
+  the fork's *successful* tool results (`💾 自我改进回顾：技能 'x' 已修补 ·
+  记忆已更新`, `💾 Self-improvement review: ...` in an English locale), staged
+  writes and failed calls are skipped, and a quiet review keeps the plain
+  completion line.
 - `memory` now speaks Hermes' current action model: `add` / `patch` / `remove`,
   where `patch` replaces exactly one `old_text` span and keeps the rest of the
   entry. `replace` is refused with Hermes' own sentence and survives only to

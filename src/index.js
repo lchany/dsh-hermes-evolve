@@ -110,6 +110,10 @@ function resolveLang (ctx) {
 function apply (ctx, config = {}) {
   const logger = pickLogger(ctx)
   const settings = { ...DEFAULTS, ...sanitizeConfig(config) }
+  // Prose this plugin writes (notices, panel labels, memory context) follows the
+  // deployment locale; Hermes does the same through its i18n catalogs.
+  const refreshLang = () => { settings.lang = resolveLang(ctx) }
+  refreshLang()
 
   // ── settings: live values ───────────────────────────────────────────────
   //
@@ -124,6 +128,7 @@ function apply (ctx, config = {}) {
         Object.assign(settings, sanitizeConfig(descriptor.value))
       }
     } catch { /* settings not ready yet */ }
+    refreshLang()
   }
   refreshLive()
   void (async () => {
