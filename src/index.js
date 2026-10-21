@@ -214,7 +214,13 @@ function apply (ctx, config = {}) {
     disposers.push(ctx.systemPrompt.section({
       name: `${PLUGIN}:memory-guidance`,
       order: 50,
-      text: () => (injectMemory() ? prompts.memoryGuidance(true) : ''),
+      text: () => (injectMemory()
+        ? prompts.memoryGuidance({
+            memoryEnabled: settings.memoryEnabled !== false,
+            userProfileEnabled: settings.userProfileEnabled !== false,
+            skillManageAvailable: hasSkillManage()
+          })
+        : ''),
     }))
     disposers.push(ctx.systemPrompt.section({
       name: `${PLUGIN}:skills-coaching`,
@@ -275,6 +281,8 @@ function apply (ctx, config = {}) {
       maxBodyChars: settings.maxBodyChars,
       memoryCharLimit: settings.memoryCharLimit,
       userCharLimit: settings.userCharLimit,
+      memoryEnabled: settings.memoryEnabled !== false,
+      userProfileEnabled: settings.userProfileEnabled !== false,
       // Hermes gates tool writes too, not just forks: `skills.write_approval` /
       // `memory.write_approval` are read on every write path.
       writeApproval: settings.skillsWriteApproval === true,
@@ -292,7 +300,8 @@ function apply (ctx, config = {}) {
     const disposers = []
     const skipped = []
     for (const definition of skillTools.buildToolSet({ resolveContext: resolveToolContext })) {
-      if (definition.name === 'memory' && foreignMemory) { skipped.push('memory'); continue }
+      const memoryDisabled = settings.memoryEnabled === false && settings.userProfileEnabled === false
+      if (definition.name === 'memory' && (foreignMemory || memoryDisabled)) { skipped.push('memory'); continue }
       if (!ownTool(definition.name)) { skipped.push(definition.name); continue }
       try {
         disposers.push(ctx.tools.register(definition))

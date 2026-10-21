@@ -65,15 +65,29 @@ const SKILL_SAFETY_TEXT = [
   'remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions.',
 ].join('\n')
 
-/** `build_memory_guidance(True, True)` — verbatim (agent/prompt_builder.py:199-233). */
-const MEMORY_GUIDANCE_TEXT = (
+/** `build_memory_guidance` frames — verbatim (agent/prompt_builder.py:199-233). */
+const MEMORY_FRAME = (
   'You have persistent memory, carried across sessions and loaded '
   + "into each new session's context; the memory tool's schema defines what belongs there. "
-  + 'Skills come first: when you learn something while doing a task — a '
+)
+const USER_PROFILE_FRAME = (
+  'You have a persistent user profile, carried across sessions and '
+  + "loaded into each new session's context; save durable facts about the user with the "
+  + "memory tool (target='user') — the built-in notes store is disabled, so never target='memory'. "
+)
+const SKILL_ROUTING = (
+  'Skills come first: when you learn something while doing a task — a '
   + 'procedure, a pitfall, and the user\'s preferences and corrections '
   + 'for that kind of work — record it in the skill you used or built '
   + 'for the task (skill_manage), where it loads only when relevant. '
-  + 'Memory is the narrow exception for facts that apply to EVERY '
+)
+const SKILL_ROUTING_UNAVAILABLE = (
+  'Task-specific knowledge — procedures, pitfalls, and the user\'s preferences '
+  + 'and corrections for that kind of work — belongs in skills, not in memory, '
+  + 'even when skill writing is unavailable. '
+)
+const MEMORY_GUIDANCE_TAIL = (
+  'Memory is the narrow exception for facts that apply to EVERY '
   + 'session regardless of task (who the user is, environment facts, '
   + 'standing conventions with no task home); it has a hard character '
   + 'budget, so when it fills, replace or consolidate stale entries '
@@ -85,13 +99,27 @@ const MEMORY_GUIDANCE_TEXT = (
   + 'procedures and workflows belong in skills.'
 )
 
+/** `build_memory_guidance(True, True)` — the default, memory-store-enabled variant. */
+const MEMORY_GUIDANCE_TEXT = MEMORY_FRAME + SKILL_ROUTING + MEMORY_GUIDANCE_TAIL
+
 function skillsCoaching (enabled, options = {}) {
   if (enabled === false) return ''
   return `${skillsCoachingText(options)}\n\n${SKILL_SAFETY_TEXT}`
 }
 
-function memoryGuidance (enabled) {
-  return enabled === false ? '' : MEMORY_GUIDANCE_TEXT
+/**
+ * Port of `build_memory_guidance(memory_enabled, profile_enabled, skill_manage_available)`.
+ * The frame changes when only the user profile is enabled; the skill-routing
+ * sentence changes when `skill_manage` is unavailable. The tail never changes.
+ */
+function memoryGuidance (options = {}) {
+  const opts = typeof options === 'boolean' ? { memoryEnabled: options, userProfileEnabled: options } : options
+  const memoryEnabled = opts.memoryEnabled !== false
+  const userProfileEnabled = opts.userProfileEnabled !== false
+  if (!memoryEnabled && !userProfileEnabled) return ''
+  const frame = memoryEnabled ? MEMORY_FRAME : USER_PROFILE_FRAME
+  const routing = opts.skillManageAvailable === false ? SKILL_ROUTING_UNAVAILABLE : SKILL_ROUTING
+  return frame + routing + MEMORY_GUIDANCE_TAIL
 }
 
 // ── review prompts (fork system prompt) ────────────────────────────────────

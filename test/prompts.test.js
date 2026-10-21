@@ -65,6 +65,18 @@ test('review user message carries hermes transcript + prompt + tool suffix', () 
   assert.match(withMemory, /You can only call memory and skill management tools\./)
 })
 
+test('memory guidance follows Hermes\' store and tool-availability branches', () => {
+  const memoryOnly = prompts.memoryGuidance({ memoryEnabled: true, userProfileEnabled: false })
+  assert.match(memoryOnly, /^You have persistent memory, carried across sessions/)
+  const profileOnly = prompts.memoryGuidance({ memoryEnabled: false, userProfileEnabled: true })
+  assert.match(profileOnly, /^You have a persistent user profile, carried across sessions/)
+  assert.match(profileOnly, /save durable facts about the user with the memory tool \(target='user'\)/)
+  assert.match(profileOnly, /never target='memory'/)
+  const noSkillTool = prompts.memoryGuidance({ memoryEnabled: true, userProfileEnabled: true, skillManageAvailable: false })
+  assert.match(noSkillTool, /belongs in skills, not in memory, even when skill writing is unavailable\./)
+  assert.equal(prompts.memoryGuidance({ memoryEnabled: false, userProfileEnabled: false }), '')
+})
+
 test('the always-on guidance is short enough to sit in every system prompt', () => {
   assert.ok(prompts.SKILLS_COACHING_TEXT.length < 2000)
   assert.ok(prompts.MEMORY_GUIDANCE_TEXT.length < 1500)

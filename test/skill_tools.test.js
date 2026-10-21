@@ -144,6 +144,45 @@ test('memory tool offers add/patch/remove and refuses replace with a redirect', 
   })
 })
 
+test('the memory tool requires an explicit target and refuses a disabled store', async () => {
+  await withHome(async () => {
+    const tools = buildToolSet({
+      memoryCharLimit: 2200,
+      userCharLimit: 1375,
+      memoryEnabled: false,
+      userProfileEnabled: true,
+    })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+
+    const missing = JSON.parse(await memoryTool.execute({ action: 'add', content: 'x' }, exec))
+    assert.equal(missing.success, false)
+    assert.match(missing.error, /^Missing required target\. Retry with target='memory' or target='user' at the top level\./)
+
+    const disabled = JSON.parse(await memoryTool.execute({ target: 'memory', action: 'add', content: 'x' }, exec))
+    assert.equal(disabled.success, false)
+    assert.equal(disabled.error, 'Built-in MEMORY.md writes are disabled in memory config.')
+    assert.equal(disabled.target, 'memory')
+
+    const userWrite = JSON.parse(await memoryTool.execute({ target: 'user', action: 'add', content: 'Prefers Chinese' }, exec))
+    assert.equal(userWrite.success, true)
+  })
+})
+
+test('a batch operation naming another target is refused like Hermes', async () => {
+  await withHome(async () => {
+    const tools = buildToolSet({ memoryCharLimit: 2200, userCharLimit: 1375 })
+    const memoryTool = tools.find((tool) => tool.name === 'memory')
+    const exec = { signal: undefined, agent: undefined, name: 'memory' }
+    const result = JSON.parse(await memoryTool.execute({
+      target: 'memory',
+      operations: [{ action: 'add', content: 'A' }, { action: 'add', target: 'user', content: 'B' }],
+    }, exec))
+    assert.equal(result.success, false)
+    assert.match(result.error, /^Operation 2 names a different target than the one at the top level\. One call writes one store/)
+  })
+})
+
 test('a single patch without old_text echoes the store like Hermes', async () => {
   await withHome(async (home) => {
     await memory.writeMemory(join(home, 'memories'), 'memory', [{ action: 'add', text: 'Existing fact' }], { limit: 2200 })

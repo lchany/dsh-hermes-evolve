@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — memory tool and guidance parity with hermes v0.22.2
+
+- The memory guidance prompt now follows `build_memory_guidance`'s branches:
+  the user-profile-only frame when the notes store is disabled, the
+  no-skill-tool routing sentence when `skill_manage` is unavailable, and an
+  empty string when both stores are off (`agent/prompt_builder.py:199-233`).
+- The memory tool requires an explicit `target` (no silent default), refuses a
+  batch whose nested `target` differs from the top-level one, and refuses a
+  write to a disabled built-in store with `Built-in MEMORY.md/USER.md writes are
+  disabled in memory config.` (`tools/memory_tool.py:_memory_target_error`).
+- The memory tool is not advertised when both stores are disabled, and
+  `/memory approve` refuses to replay into a disabled store.
+- The injected memory percentage now truncates like hermes (`int()`), so
+  14/2200 chars renders as 0%, not 1%.
 ### Fixed — review trigger parity with hermes v0.22.2
 
 - Removed the invented 30-minute cooldown: hermes only refuses a run while the

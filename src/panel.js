@@ -271,6 +271,8 @@ function registerPanelRoutes (webServerCtx, deps) {
             limit: Number.isFinite(record.limit)
               ? record.limit
               : (record.target === 'user' ? DEFAULTS.userCharLimit : DEFAULTS.memoryCharLimit),
+            memoryEnabled: settings.memoryEnabled !== false,
+            userProfileEnabled: settings.userProfileEnabled !== false,
           })
           if (applied.ok !== true) {
             sendJson(res, 409, { ok: false, applied, record })

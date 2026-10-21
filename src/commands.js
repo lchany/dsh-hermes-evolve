@@ -108,8 +108,13 @@ function changedEntries (outcome, kind) {
   return out
 }
 
-async function applyMemoryPending (row) {
-  return skillTools.applyPendingMemory(row, { limit: row.limit !== undefined ? row.limit : undefined })
+async function applyMemoryPending (row, deps) {
+  const settings = deps && deps.settings ? deps.settings : {}
+  return skillTools.applyPendingMemory(row, {
+    limit: row.limit !== undefined ? row.limit : undefined,
+    memoryEnabled: settings.memoryEnabled !== false,
+    userProfileEnabled: settings.userProfileEnabled !== false,
+  })
 }
 
 /** hermes `_approve`: replay each pending write, then report what it overwrote. */
@@ -136,7 +141,7 @@ async function approve (subsystem, args, deps) {
     let ok = false
     let message = ''
     if (subsystem === 'memory') {
-      const outcome = await applyMemoryPending(row)
+      const outcome = await applyMemoryPending(row, deps)
       ok = outcome.ok === true
       message = outcome.ok === true ? '' : String(outcome.detail || outcome.reason || 'apply failed')
       if (ok) {

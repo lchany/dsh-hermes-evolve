@@ -61,6 +61,10 @@ function toolContext (overrides = {}) {
     maxBodyChars: store.BODY_MAX_CHARS,
     memoryCharLimit: DEFAULTS.memoryCharLimit,
     userCharLimit: DEFAULTS.userCharLimit,
+    // `get_builtin_memory_store_flags`: a disabled store refuses writes, the
+    // other store keeps working.
+    memoryEnabled: true,
+    userProfileEnabled: true,
     // hermes `_review_tool_whitelist`: a memory-less review pass must not even
     // SEE the memory tool, or it burns iterations on a denied call.
     includeMemory: true,
@@ -695,8 +699,12 @@ async function stageMemoryOperations ({ target, limit, operations, approval }) {
  * `oldText` (which could hit a newer entry the approver never saw). Shared by
  * `/memory approve` and the panel so both gates behave the same.
  */
-async function applyPendingMemory (row, { limit } = {}) {
+async function applyPendingMemory (row, { limit, memoryEnabled, userProfileEnabled } = {}) {
   const target = row.target === 'user' ? 'user' : 'memory'
+  const storeEnabled = target === 'user' ? userProfileEnabled !== false : memoryEnabled !== false
+  if (!storeEnabled) {
+    return { ok: false, detail: `Built-in ${target === 'user' ? 'USER.md' : 'MEMORY.md'} writes are disabled in memory config.` }
+  }
   const operations = Array.isArray(row.operations) ? row.operations : []
   const destructive = operations.filter((op) => BG_DELETE_ACTIONS.has(op.action))
   if (destructive.some((op) => typeof op.matched_entry !== 'string' || op.matched_entry === '')) {
@@ -732,9 +740,30 @@ async function handleMemory (args, ctx) {
     // `memory.write_approval` is its own gate in Hermes; the legacy single flag
     // stays honoured when no subsystem-specific value was supplied (old callers).
     const approval = ctx.memoryApproval !== undefined ? ctx.memoryApproval === true : ctx.writeApproval === true
-    const target = args && args.target ? String(args.target) : 'memory'
+    // Hermes requires an explicit target (`_memory_target_error`): a missing one is
+    // an argument error, never a silent default to the notes store.
+    const rawTarget = args ? args.target : undefined
+    if (rawTarget === undefined || rawTarget === null || rawTarget === '') {
+      return json({
+        success: false,
+        error: "Missing required target. Retry with target='memory' or target='user' at the top level. "
+          + 'For a batch, remove target from every operation; use separate calls for different stores. '
+          + 'Nothing was written or staged.',
+      })
+    }
+    const target = String(rawTarget)
     if (target !== 'memory' && target !== 'user') {
       return fail(`Invalid memory target '${target}'. Use 'memory' or 'user'.`)
+    }
+    // A disabled built-in store still allows the other one; the write itself is
+    // refused with Hermes' `_memory_target_error` text.
+    const storeEnabled = target === 'user' ? ctx.userProfileEnabled !== false : ctx.memoryEnabled !== false
+    if (!storeEnabled) {
+      return json({
+        success: false,
+        error: `Built-in ${target === 'user' ? 'USER.md' : 'MEMORY.md'} writes are disabled in memory config.`,
+        target,
+      })
     }
     const limit = target === 'user' ? ctx.userCharLimit : ctx.memoryCharLimit
     if (limit === undefined) return fail('Memory limits are not configured.')
@@ -745,6 +774,20 @@ async function handleMemory (args, ctx) {
     const operations = Array.isArray(args && args.operations) ? args.operations : undefined
 
     if (operations !== undefined) {
+      // One call writes one store; a nested target that differs from the top-level
+      // one is refused rather than silently ignored (memory_tool.py `_memory_target_error`).
+      for (let index = 0; index < operations.length; index += 1) {
+        const op = operations[index]
+        if (op !== null && typeof op === 'object' && op.target !== undefined && op.target !== null
+            && String(op.target) !== target) {
+          return json({
+            success: false,
+            error: `Operation ${index + 1} names a different target than the one at the top level. `
+              + 'One call writes one store: retry with separate calls for different stores. '
+              + 'Nothing was written or staged.',
+          })
+        }
+      }
       const normalized = operations.map((op) => ({
         action: String(op.action || ''),
         text: typeof op.content === 'string' ? op.content : (typeof op.new_text === 'string' ? op.new_text : ''),
