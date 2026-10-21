@@ -225,3 +225,20 @@ test('a quiet review still leaves the plain completion line', () => {
   })
   assert.equal(appended[0].data.source.summary, '背景复盘完成（skills，3s）')
 })
+
+test('delegated sessions and review forks never trigger a review', async () => {
+  let fired = 0
+  const { session } = fakeSession('sub-1')
+  session.header.origin = 'subagent'
+  const scheduler = review.createScheduler({
+    hostCtx: null,
+    settings: { ...SETTINGS, skillNudgeInterval: 1, memoryNudgeInterval: 1 },
+    logger: { info: () => {}, debug: () => {} },
+    runReview: async () => { fired += 1; return { ok: false, skipped: 'test' } },
+  })
+  await scheduler.onEvent(session, event('step/end', {}))
+  await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+  await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text: 'done' }] } }))
+  await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
+  assert.equal(fired, 0)
+})

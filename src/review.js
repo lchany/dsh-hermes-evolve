@@ -393,6 +393,11 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
    */
   async function onEvent (session, event) {
     if (event === null || typeof event !== 'object' || settings.enabled === false) return
+    // hermes shuts the loop off inside its own forks (`_memory_nudge_interval =
+    // _skill_nudge_interval = 0`, agent/background_review.py:987) and never
+    // spawns a review for a delegated agent (no memory tool, no skill_manage).
+    // one guard covers both: forks and subagents carry origin 'subagent'.
+    if (session !== null && typeof session === 'object' && session.header && session.header.origin === 'subagent') return
     const state = stateOf(session.id)
     switch (event.type) {
       case 'step/end': {
