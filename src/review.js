@@ -404,6 +404,15 @@ function createScheduler ({ hostCtx, settings, logger, runReview: reviewImpl, no
         state.itersSinceSkill += 1
         break
       }
+      case 'tool/call': {
+        // hermes resets the dimension it just touched: `memory` zeroes the turn
+        // counter (tool_executor.py:746), `skill_manage` the iteration counter
+        // (:749). A tool write IS the maintenance, so the nudge defers.
+        const data = event.data || {}
+        if (data.name === 'skill_manage') state.itersSinceSkill = 0
+        else if (data.name === 'memory') state.turnsSinceMemory = 0
+        break
+      }
       case 'user/message': {
         const data = event.data || {}
         const kind = data.source && data.source.kind ? data.source.kind : ''

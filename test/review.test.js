@@ -242,3 +242,39 @@ test('delegated sessions and review forks never trigger a review', async () => {
   await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
   assert.equal(fired, 0)
 })
+
+test('writing through the tools defers the matching nudge like hermes', async () => {
+  let fired = 0
+  const { session } = fakeSession('tools-1')
+  const scheduler = review.createScheduler({
+    hostCtx: null,
+    settings: { ...SETTINGS, skillNudgeInterval: 2, memoryNudgeInterval: 2 },
+    logger: { info: () => {}, debug: () => {} },
+    runReview: async () => { fired += 1; return { ok: false, skipped: 'test' } },
+  })
+  const call = (name) => event('tool/call', { callId: `c-${name}`, name, arguments: '{}' })
+  const finish = async (text) => {
+    await scheduler.onEvent(session, event('assistant/message', { message: { content: [{ type: 'text', text }] } }))
+    await scheduler.onEvent(session, event('turn/end', { reason: { kind: 'completed' } }))
+  }
+
+  // Two iterations would fire, but the model already patched a skill.
+  await scheduler.onEvent(session, event('step/end', {}))
+  await scheduler.onEvent(session, call('skill_manage'))
+  await scheduler.onEvent(session, event('step/end', {}))
+  await finish('done')
+  assert.equal(fired, 0)
+
+  // Two user turns would fire, but the model already wrote memory.
+  await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'a' }], source: { kind: 'user' } }))
+  await scheduler.onEvent(session, call('memory'))
+  await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'b' }], source: { kind: 'user' } }))
+  await finish('done again')
+  assert.equal(fired, 0)
+
+  // Without the tool writes the counters reach their thresholds.
+  await scheduler.onEvent(session, event('step/end', {}))
+  await scheduler.onEvent(session, event('user/message', { content: [{ type: 'text', text: 'c' }], source: { kind: 'user' } }))
+  await finish('third')
+  assert.equal(fired, 1)
+})
