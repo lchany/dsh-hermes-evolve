@@ -336,3 +336,28 @@ test('approval mode stages memory writes through the pending store', async () =>
     assert.equal(pending[0].actor, 'write-approval')
   })
 })
+
+test('a category lands in frontmatter, never in the directory layout', async () => {
+  await withHome(async (home) => {
+    const call = toolset()
+    const result = await call('skill_manage', {
+      operations: [{ action: 'create', name: 'pdf-toolkit', category: 'dev', content: SKILL_MD }],
+    })
+    assert.equal(result.success, true, JSON.stringify(result))
+
+    // DSH discovers <root>/<name>/SKILL.md and does not descend: keep it flat.
+    assert.equal(await exists(join(home, 'skills', 'pdf-toolkit', 'SKILL.md')), true)
+    assert.equal(await exists(join(home, 'skills', 'dev')), false)
+
+    const written = await readFile(join(home, 'skills', 'pdf-toolkit', 'SKILL.md'), 'utf8')
+    assert.equal(store.parseFrontmatter(written).frontmatter.category, 'dev')
+
+    const list = await call('skills_list', {})
+    assert.deepEqual(list.skills, [{
+      name: 'pdf-toolkit',
+      description: 'Extract text and tables from PDF files without losing layout.',
+      category: 'dev',
+    }])
+    assert.deepEqual(list.categories, ['dev'])
+  })
+})

@@ -6,10 +6,11 @@
  * define where a skill lives, what a write is allowed to touch, and how a removal
  * becomes an archive instead of a delete.
  *
- * Layout (identical to hermes, rooted at DSH_HOME):
+ * Layout (rooted at DSH_HOME). Flat on purpose: DSH discovers `<root>/<name>/SKILL.md`
+ * and never descends into category directories, so hermes' `<category>/<name>` nesting
+ * would write skills the host cannot load. `category` survives as frontmatter.
  *
  *   $DSH_HOME/skills/<name>/SKILL.md            the library (DSH's own scanner reads this)
- *   $DSH_HOME/skills/<category>/<name>/SKILL.md optional nesting
  *   $DSH_HOME/skills/.archive/<name>/           archived packages (recoverable)
  *   $DSH_HOME/skills/.usage.json                usage sidecar (see skill_usage.js)
  *   $DSH_HOME/skills/.curator_state             curator scheduling state
@@ -199,10 +200,17 @@ async function walkSkillDirs (root, found = [], depth = 0) {
   return found
 }
 
-function categoryOf (dir) {
-  const rel = relative(skillsDir(), dir)
-  const parts = rel.split(sep)
-  return parts.length > 1 ? parts[0] : undefined
+function categoryOf (frontmatter) {
+  const value = frontmatter.category
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+/** Persist a requested category in frontmatter; the directory layout stays flat. */
+function withCategory (content, category) {
+  if (category === '') return content
+  const { frontmatter, body } = parseFrontmatter(content)
+  if (categoryOf(frontmatter) !== undefined) return content
+  return composeSkillMd({ ...frontmatter, category }, body)
 }
 
 /** Every skill on disk, resolved to its frontmatter name. */
@@ -224,7 +232,7 @@ async function scanSkills () {
     out.push({
       name: declared.slice(0, NAME_MAX),
       description: truncate(description || '', DESCRIPTION_MAX),
-      category: categoryOf(dir),
+      category: categoryOf(frontmatter),
       dir,
       mdPath,
       relPath: relative(root, mdPath).split(sep).join('/'),
@@ -725,6 +733,7 @@ module.exports = {
   parseFrontmatter,
   serializeFrontmatter,
   composeSkillMd,
+  withCategory,
   scanSkills,
   findSkill,
   listLinkedFiles,

@@ -103,6 +103,7 @@
 | D10 | `/curator status|run|pause|resume|pin|unpin|restore|list-archived` 已按 `hermes_cli/curator.py` 的文案移植（`run` 支持 `--dry-run`/`--consolidate`）；仍无 CLI 的 `ledger`/`rollback`/`adopt`/`prune`/`backup`/`archive`/`list-unmanaged`/`purge`。面板 `/hermes-evolve/api` 覆盖 status/run/pause/resume/restore/settings 以及 **pin/unpin/purge**：pin 复用 CLI 的 not-agent/not-eligible/unmanaged 文案，purge 支持 `curator.archive_ttl_days` 的 0 禁用语义、dry-run 与逐项 `captureBefore` + ledger；页面有点位按钮 | **残留**：`adopt`、`rollback <backup>`、`report` 的文本输出仍无对应 UI |
 | D11 | 复盘结果以一行 plugin notice 写回源会话；有落地动作时按 hermes `_action_lines` 逐项列出（`💾 自我改进回顾：技能 'x' 已修补 · 记忆已更新`，英文 locale 用 `💾 Self-improvement review:`），动作行只取自 fork 里**成功**的工具结果，暂存/失败/未应用的不计；无动作时保留一行完成提示 | hermes 把回顾打印到 CLI/TUI 回调；DSH 没有跨面板的状态行通道，只能写成会话内 notice（`source.kind='hermes-evolve'`, `form:'notice'`） |
 | D12 | 不注入语言指令 | hermes 没有语言指令；早期版本照抄了 `@weibaohui/hermes-loop` 的做法，已删除 |
+| D13 | 技能库平铺：`skill_manage` 的 `category` 不再建目录，改写入 frontmatter 的 `category:` 字段；`scanSkills` 从 frontmatter 读分类，`skills_list` 的过滤/排序/`categories` 输出不变。curator 的 `restore` 本来就恢复成 `skills/<name>`，现在两条路径一致 | **必须**：DSH 的 `dsh-skill-filesystem` 只发现 `<root>/<name>/SKILL.md`，不递归分类目录，照抄 hermes 的 `<category>/<name>` 会让技能写进去却永远读不出来（实测 49 个技能不在宿主清单里） |
 
 ## 4. 明确未移植
 

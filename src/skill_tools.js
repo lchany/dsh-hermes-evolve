@@ -403,22 +403,23 @@ async function opCreate (op, name, ctx, bag) {
   if (category !== '' && !/^[A-Za-z0-9._-]+$/.test(category)) {
     return { ok: false, error: `Invalid category '${category}': single path segment, no slashes.` }
   }
-  const dir = join(skillsDir(), ...(category === '' ? [name] : [category, name]))
+  const dir = join(skillsDir(), name)
   const mdPath = join(dir, 'SKILL.md')
   if (await exists(mdPath)) {
     return { ok: false, error: `Skill directory already exists at ${dir}.` }
   }
+  const stored = store.withCategory(content, category)
   bag.touched.set(mdPath, null)
   await ensureDir(dir)
   bag.created.push(dir)
-  await atomicWrite(mdPath, content)
+  await atomicWrite(mdPath, stored)
   await usage.recordCreated(name, { agentCreated: ctx.agentCreated === true })
   if (ctx.linterEnabled) {
-    const findings = linter.lintContent(content, { skillDir: dir })
+    const findings = linter.lintContent(stored, { skillDir: dir })
     if (findings.length > 0) bag.lintNotes.push({ skill: name, findings })
   }
   if (ctx.ledgerEnabled) {
-    await store.ledgerAppend({ action: 'create', skill: name, before: null, after: sha256(content), actor: ctx.actor || 'review' })
+    await store.ledgerAppend({ action: 'create', skill: name, before: null, after: sha256(stored), actor: ctx.actor || 'review' })
   }
   return { ok: true, action: 'create', name, message: `Created skill '${name}'.` }
 }

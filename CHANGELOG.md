@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed — skills are written where DSH can find them
+
+- `skill_manage` create no longer nests the package under `<category>/<name>`.
+  DSH's `dsh-skill-filesystem` discovers only `<root>/<name>/SKILL.md` and never
+  descends into category directories, so every skill authored with a category
+  was written into a shape the host could not load: 49 of them were invisible to
+  the session skill catalog (`skill <name>` answered `unknown` while the plugin's
+  own `skill_view` resolved them). The library is now flat; `category` is
+  persisted as a frontmatter field, so `skills_list` filtering, ordering and the
+  `categories` array are unchanged, and the curator's `restore` (which already
+  restored to `skills/<name>`) is finally consistent with create. See
+  `COMPATIBILITY.md` D13.
+
 ### Fixed — memory tool and guidance parity with hermes v0.22.2
 
 - The memory guidance prompt now follows `build_memory_guidance`'s branches:
